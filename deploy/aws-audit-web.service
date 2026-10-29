@@ -1,0 +1,28 @@
+[Unit]
+Description=AWS audit report password service (Nginx loopback backend)
+After=network.target
+
+[Service]
+Type=simple
+User=shenji-web
+Group=shenji-web
+WorkingDirectory=/opt/aws-daily-audit
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/aws-daily-audit/.venv/bin/python /opt/aws-daily-audit/audit_web.py --publish-dir /usr/local/shenji/index --state-dir /usr/local/shenji/auth --port 9998
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/aws-daily-audit /usr/local/shenji/index /usr/local/shenji/auth
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=192M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

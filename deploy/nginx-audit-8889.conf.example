@@ -1,0 +1,51 @@
+# 替换用户现有 listen 8889 的审计 server；不是追加第二份重复配置。
+# 默认认证服务由 aws-audit-web.service 在本机 127.0.0.1:9998 提供。
+server {
+    listen 8889;
+    server_name zybocedata-pass.v668live.com;
+    absolute_redirect off;
+
+    location = /audit {
+        return 302 /audit/;
+    }
+
+    location ^~ /audit/ {
+        # 不加 URI 后缀，保留 /audit/ 路径供认证服务识别。
+        proxy_pass http://127.0.0.1:9998;
+        proxy_http_version 1.0;
+        proxy_redirect off;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header Connection "";
+        proxy_set_header Authorization "";
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 15s;
+        client_max_body_size 2k;
+        client_body_timeout 10s;
+        proxy_request_buffering on;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+        proxy_intercept_errors off;
+        error_page 500 502 503 504 =503 @audit_password_unavailable;
+    }
+
+    location @audit_password_unavailable {
+        default_type text/plain;
+        return 503 "Audit authentication unavailable.\n";
+    }
+
+    # 原有前端必须保留；审计认证仅影响 /audit/。
+    location / {
+        proxy_pass http://127.0.0.1:8890;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}

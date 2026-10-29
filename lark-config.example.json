@@ -1,0 +1,7 @@
+{
+  "webhook_url": "https://open.larksuite.com/open-apis/bot/v2/hook/REPLACE_WITH_YOUR_TOKEN",
+  "signing_secret": "",
+  "message_mode": "overview",
+  "report_url_template": "https://zybocedata-pass.v668live.com/audit/",
+  "title_prefix": "AWS操作审计日报"
+}

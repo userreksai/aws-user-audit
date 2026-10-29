@@ -1,0 +1,53 @@
+{
+  "_说明": "纯虚构示例；账号、IP、资源和身份均为示例，用于离线验证。",
+  "Records": [
+    {
+      "eventVersion": "1.11", "eventID": "demo-create-001", "eventTime": "2026-10-27T01:10:00Z",
+      "eventSource": "ec2.amazonaws.com", "eventName": "AuthorizeSecurityGroupIngress", "awsRegion": "eu-north-1", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx", "arn": "arn:aws:iam::123456789012:user/hhjgx"},
+      "sourceIPAddress": "203.0.113.10", "requestParameters": {"groupId": "sg-demo001", "ipPermissions": {"items": [{"ipProtocol": "tcp", "fromPort": 443, "toPort": 443, "ipRanges": {"items": [{"cidrIp": "203.0.113.0/24", "description": "示例办公网"}]}}]}},
+      "responseElements": {"return": true}
+    },
+    {
+      "eventID": "demo-update-002", "eventTime": "2026-10-27T02:32:15Z", "eventSource": "ec2.amazonaws.com", "eventName": "ModifyInstanceAttribute", "awsRegion": "eu-north-1", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx", "arn": "arn:aws:iam::123456789012:user/hhjgx"},
+      "sourceIPAddress": "203.0.113.10", "requestParameters": {"instanceId": "i-demo001", "instanceType": {"value": "t3.medium"}}, "responseElements": {"return": true}
+    },
+    {
+      "eventID": "demo-delete-003", "eventTime": "2026-10-27T03:08:00Z", "eventSource": "iam.amazonaws.com", "eventName": "DeleteAccessKey", "awsRegion": "us-east-1", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx"}, "sourceIPAddress": "203.0.113.10",
+      "requestParameters": {"userName": "old-deploy-user", "accessKeyId": "AKIAEXAMPLE0000000000"}, "responseElements": null
+    },
+    {
+      "eventID": "demo-secret-read-004", "eventTime": "2026-10-27T04:20:00Z", "eventSource": "secretsmanager.amazonaws.com", "eventName": "GetSecretValue", "awsRegion": "eu-north-1", "readOnly": true,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx"}, "sourceIPAddress": "203.0.113.10", "requestParameters": {"secretId": "prod/example/db", "versionStage": "AWSCURRENT"}, "responseElements": null
+    },
+    {
+      "eventID": "demo-ignored-005", "eventTime": "2026-10-27T05:00:00Z", "eventSource": "ec2.amazonaws.com", "eventName": "DescribeInstances", "awsRegion": "eu-north-1", "readOnly": true,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx"}, "requestParameters": {}, "responseElements": null
+    },
+    {
+      "eventID": "demo-failed-006", "eventTime": "2026-10-27T06:12:00Z", "eventSource": "secretsmanager.amazonaws.com", "eventName": "DeleteSecret", "awsRegion": "eu-north-1", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "AssumedRole", "arn": "arn:aws:sts::123456789012:assumed-role/DeployRole/build-session", "principalId": "DEMO:build-session", "sessionContext": {"sessionIssuer": {"userName": "DeployRole", "arn": "arn:aws:iam::123456789012:role/DeployRole"}, "sourceIdentity": "pipeline-example"}},
+      "sourceIPAddress": "203.0.113.20", "requestParameters": {"secretId": "prod/example/db", "recoveryWindowInDays": 7}, "errorCode": "AccessDenied", "errorMessage": "Example role is not authorized to perform secretsmanager:DeleteSecret"
+    },
+    {
+      "eventID": "demo-secret-write-007", "eventTime": "2026-10-27T07:05:00Z", "eventSource": "secretsmanager.amazonaws.com", "eventName": "PutSecretValue", "awsRegion": "eu-north-1", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx"}, "requestParameters": {"secretId": "prod/example/db", "secretString": "THIS-IS-A-FAKE-SECRET-FOR-REDACTION-TEST"}, "responseElements": {"name": "prod/example/db", "versionId": "example-version"}
+    },
+    {
+      "eventID": "demo-login-success-009", "eventTime": "2026-10-27T08:15:00Z", "eventSource": "signin.amazonaws.com", "eventName": "ConsoleLogin", "eventType": "AwsConsoleSignIn", "awsRegion": "ap-southeast-2", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx"}, "sourceIPAddress": "203.0.113.10", "requestParameters": null,
+      "responseElements": {"ConsoleLogin": "Success"}, "additionalEventData": {"MFAUsed": "Yes"}
+    },
+    {
+      "eventID": "demo-login-failure-010", "eventTime": "2026-10-27T08:20:00Z", "eventSource": "signin.amazonaws.com", "eventName": "ConsoleLogin", "eventType": "AwsConsoleSignIn", "awsRegion": "ap-southeast-2", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "demo-user"}, "sourceIPAddress": "203.0.113.20", "requestParameters": null,
+      "responseElements": {"ConsoleLogin": "Failure"}, "additionalEventData": {"MFAUsed": "No"}
+    },
+    {
+      "eventID": "demo-next-day-008", "eventTime": "2026-10-27T16:00:00Z", "eventSource": "iam.amazonaws.com", "eventName": "CreateUser", "awsRegion": "us-east-1", "readOnly": false,
+      "recipientAccountId": "123456789012", "userIdentity": {"type": "IAMUser", "userName": "hhjgx"}, "requestParameters": {"userName": "next-day-user"}
+    }
+  ]
+}
