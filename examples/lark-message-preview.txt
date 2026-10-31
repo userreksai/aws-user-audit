@@ -6,5 +6,3 @@ Secrets Manager 查看：1　登录信息：2
 北京时间：2026-10-27 07:00:00 至 2026-10-28 08:00:00
 【离线示例数据，非真实 AWS 账号审计】
 详细报告：https://zybocedata-pass.v668live.com/audit/
-访问密码：EXAMPLE_ONLY_PASSWORD_01
-打开链接后仅输入密码；下次日报更新时更换，同日报表重跑沿用。

@@ -1,0 +1,20 @@
+[Unit]
+Description=AWS daily account operation audit and Lark overview
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory="/usr/local/shenji"
+ExecStart="/usr/local/shenji/.venv/bin/python" "/usr/local/shenji/deploy/run_scheduled.py" "--install-dir" "/usr/local/shenji" "--publish-dir" "/usr/local/shenji/index" "--profile" "audit" "--lark-config" "/usr/local/shenji/lark-config.json" "--report-url" "https://zybocedata-pass.v668live.com/audit/"
+TimeoutStartSec=2h
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal

@@ -1,6 +1,82 @@
 # AWS 账号每日审计报告
 
-如需单独采集 RDS 管理操作、检查 MySQL / Aurora MySQL 数据库内部增删改的审计配置并导出已有 SQL 日志，请使用新增的 [RDS 采集脚本说明](RDS_AUDIT.md) 和 `rds_audit.py`。
+## 已确认的服务器部署方式（使用 install.sh）
+
+本次部署取消网页密码认证，报告由现有 Nginx 直接提供。安装/更新过程只配置服务和定时器，不查询 AWS，也不推送 Lark。
+
+| 项目 | 配置 |
+| --- | --- |
+| GitHub 仓库 | https://github.com/userreksai/aws-user-audit |
+| 代码 / Python 虚拟环境 | `/usr/local/shenji/` / `/usr/local/shenji/.venv/` |
+| 网页发布位置 | `/usr/local/shenji/index/index.html`，同目录包含 CSS 和 JS |
+| 日期归档 | `/usr/local/shenji/reports/<账号>/<报表日期>/` |
+| Nginx 配置 | `/etc/nginx/conf.d/zybocedata-pass.v668live.com.conf` |
+| Nginx 入口 / 原前端 | `8889` / `127.0.0.1:8890`，原前端转发保持原文 |
+| 审计路径 / 详情链接 | `/audit/` / https://zybocedata-pass.v668live.com/audit/ |
+| AWS / Lark | root 原有 profile `audit` / `/usr/local/shenji/lark-config.json` |
+| 每日任务 | 北京时间 `08:01`，不依赖服务器系统时区 |
+| 停机恢复 | 补跑最近一份已结束的日报，不自动回填所有缺失日期 |
+
+首次部署，从仓库克隆到一个新的源码目录，再执行安装脚本。不要把仓库克隆到已经存放配置、虚拟环境和报告的目录中：
+
+```bash
+git clone https://github.com/userreksai/aws-user-audit.git /opt/aws-user-audit-src
+cd /opt/aws-user-audit-src
+sudo bash install.sh
+```
+
+安装器适用于 Linux + systemd + 宿主机 Nginx。它使用现有 Python 3.10+；Debian/Ubuntu 缺少 Python 或 venv 时安装必要依赖，不安装或重启 Nginx。AWS 凭据继续使用 root 的原有 profile `audit`，不会生成、索取或打印密钥。Lark 配置必须保存在服务器私有文件中；仓库只提供 `lark-config.example.json`，不会包含真实 Webhook。缺少配置或本地检查失败时，安装停止且不会启用任务。
+
+预览部署计划（不改系统、不联网、不发送通知）：
+
+```bash
+bash install.sh --dry-run
+```
+
+以后从 GitHub 更新代码：
+
+```bash
+sudo bash /usr/local/shenji/install.sh --update
+```
+
+更新使用临时目录获取 `main` 并复制明确的代码文件，保留 `lark-config.json`、`.aws`、`.venv`、`reports/`、`index/` 和旧认证状态。不会执行 `git reset`、删除现有配置或将示例数据发布到线上。
+
+安装器只修改已确认配置文件内唯一匹配 `server_name zybocedata-pass.v668live.com` 和 `listen 8889` 的两个审计 location。原有 `location /`、到 `8890` 的转发、请求头及其他业务配置逐字保留；若匹配不唯一、有未展开的 server 级 include、未知审计路由或原前端缺失，会停止并给出提示。修改前保存备份，`nginx -t` 通过后才 reload，检查或 reload 失败会恢复原文件，不执行 stop/restart。切换为静态审计页成功后禁用旧的 `aws-audit-web.service`，不再依赖 `9998`，也不发送访问密码。
+
+安装器会检查旧 cron 中的日报任务；发现可能重复执行时停止，让你先移除对应旧任务，不会自行删除其他 cron。新的服务名称：
+
+```text
+aws-user-audit.service    单次采集、生成、发布、Lark 总览
+aws-user-audit.timer      每天北京时间 08:01 触发，停机恢复补最近一份
+```
+
+计时器为 `Persistent=true`。安装/更新在启用前更新本任务的计时器时间戳，跳过安装当次的历史补触发，不主动执行报告；后续停机错过定时时间后，恢复会正常补跑。服务每次明确传递报表结束日期：北京时间 08:00 前选择昨天，08:00 起选择今天。因此凌晨恢复不会查询尚未结束的窗口。多天停机只补最近一份；手工补其他日期见下文。
+
+验证部署与查看日志：
+
+```bash
+systemctl list-timers --all aws-user-audit.timer
+systemctl status aws-user-audit.timer --no-pager
+journalctl -u aws-user-audit.service -n 100 --no-pager
+curl -sSI --max-time 5 -H 'Host: zybocedata-pass.v668live.com' http://127.0.0.1:8889/audit/
+```
+
+尚未生成过报告时 `/audit/` 可能返回 403/404；安装不会用示例报告冒充真实报告。已有网页在更新时保留，到下次任务才替换。首次定时运行需要 AWS 实际权限、网络和有效 Lark Webhook；安装检查只验证本地格式，不能证明远端授权或机器人投递成功。
+
+需要手工执行一次时（会真实采集并推送 Lark）：
+
+```bash
+sudo systemctl start aws-user-audit.service
+```
+
+手工补指定报表日期（同一日期重跑会覆盖该归档和网页，并再次通知）：
+
+```bash
+sudo /usr/local/shenji/.venv/bin/python /usr/local/shenji/deploy/run_scheduled.py --date 2026-10-28
+```
+
+后面的 AWS 授权和命令行说明仍适用；旧手工密码认证部署已取消，不再作为本次部署步骤。
+
 
 脚本默认查询北京时间昨天07:00至今天08:00的25小时 CloudTrail 管理事件，生成中文HTML日报和JSON明细。报表日期使用窗口结束日，例如2026-10-28日报覆盖2026-10-27 07:00至2026-10-28 08:00。报告按新增、删除、修改、Secrets Manager查看、登录信息分类，普通查看忽略。
 
@@ -233,70 +309,9 @@ chmod 600 lark-config.json
 
 此命令生成虚构数据报告，并复制到项目下`preview-site/index.html`。不访问AWS，也不发Lark；离线默认不发布到线上目录。JSON保留示例来源，HTML没有来源横幅，请勿将示例当作生产报告。
 
-### 网页单密码认证（无用户名）
+### 网页访问
 
-增加 `--auth-state-dir /usr/local/shenji/auth` 后，每个报表日期生成一个24字符随机密码，在 Lark 的增删改总览、详情链接后显示。访问 `/audit/` 会先看到只有密码输入框的登录页。HTML、CSS、JS均由认证服务检查登录会话，密码不会嵌入网页、报告JSON或URL。保持原报告样式和同源CSS/JS，兼容现有CSP。
-
-此功能需要部署新的本机认证服务，再将现有Nginx的 `/audit/` 转发给它；单独替换HTML或仅添加脚本参数不会让旧静态Nginx入口获得认证。下面以Ubuntu/Debian、脚本放在 `/opt/aws-daily-audit`、原定时任务由root执行为例。已有虚拟环境和AWS凭据继续由原任务使用。
-
-1. 解压新版完整代码到 `/opt/aws-daily-audit`，保留自己的 `lark-config.json`。创建只供网页服务使用的系统账号和私有状态目录（账号已存在时跳过useradd）：
-
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin shenji-web
-sudo install -d -o root -g shenji-web -m 2750 /usr/local/shenji/auth
-sudo install -d -o root -g shenji-web -m 0755 /usr/local/shenji/index
-```
-
-私有目录必须在网页发布目录和报告归档目录之外。运行任务的用户需要对其写入，`shenji-web` 仅需读取 `access.json`。脚本原子写入时保留目录组：认证状态为0640，密码恢复记录 `delivery.json` 为0600。后者包含用于同日重发的明文密码，仅任务用户可读，不要公开、上传或放入网页根目录。若定时任务非root，将目录owner换成实际任务用户；service的组仍需可读认证文件。不要使用777。
-
-2. 安装随包提供的服务配置。脚本目录不同，需要先修改service中的WorkingDirectory、ExecStart和ReadOnlyPaths；服务账号需要读取Python、代码及网页文件。该配置把服务文件系统设为只读，禁止写报告或认证状态。
-
-```bash
-sudo cp deploy/aws-audit-web.service /etc/systemd/system/aws-audit-web.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now aws-audit-web
-sudo systemctl status aws-audit-web --no-pager
-```
-
-服务只监听 `127.0.0.1:9998`，不向外开放该端口，也不需要新增Python依赖。它作为Nginx的本机后端使用，不单独对外提供HTTP服务。尚未生成认证状态时返回503，服务停止时Nginx返回上游错误，均不会回退为公开静态文件。
-
-3. 将 `deploy/nginx-audit.conf.example` 的三个location放入原来提供 `/audit/` 的 `server {}`，**替换旧的 `/audit/` 静态映射**，然后检查并重载。不要把该文件直接当完整server配置，也不要保留第二个同名location。
-
-如果使用 `listen 8889; server_name zybocedata-pass.v668live.com;`，可参考完整示例 `deploy/nginx-audit-8889.conf.example`。该版本已保留原有 `location /` 向 `127.0.0.1:8890` 的前端转发及原请求头，仅审计路径走认证服务。已有其他业务location也须原样保留；不要用审计配置覆盖它们。8889为Nginx入口，默认本机认证服务为9998。同一个server只能保留一份 `location = /audit` 和一份 `location ^~ /audit/`；重复定义会使配置检查失败，不能靠把新配置追加到旧alias后面启用认证。
-
-如使用此前缺少前端路由的完整示例后原网站无法访问，最小修复是在同一个server内补回一份原有 `location / { proxy_pass http://127.0.0.1:8890; ... }`，保留原前端的HTTP/1.1、Host、X-Real-IP、X-Forwarded-For和X-Forwarded-Proto设置。无需停止Nginx；使用原生效配置路径和原启动参数检查配置成功后再reload。审计服务未就绪时 `/audit/` 保持503，前端 `/` 应继续转发8890；不要为恢复前端而取消审计路径的认证。
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-示例将整个 `/audit/` 转发至9998，不依赖Nginx Basic Auth，不要求用户名，也不需要auth_request模块。对外继续使用现有HTTPS域名；登录Cookie始终使用Secure、HttpOnly、SameSite=Strict。若9999之前还有一层HTTPS代理，各层都需要 `proxy_set_header Host $http_host;` 保留原始Host，否则提交表单会因来源校验返回403。HTTP明文地址只可用于本机状态检查；浏览器应使用HTTPS地址登录。不要通过密码查询参数或URL拼接登录。
-
-Nginx所有可访问同一报告目录的旧别名、其他虚拟主机和备用端口也必须取消公开访问。关闭 `/audit/` 的代理/CDN缓存并清理旧缓存，避免缓存绕过登录。示例后端只提供固定的index/CSS/JS路由，不提供目录列表、JSON、归档或私有状态文件。
-
-4. 以原AWS任务用户执行一次正式生成和推送（这一步会实际通知Lark）：
-
-```bash
-cd /opt/aws-daily-audit
-.venv/bin/python aws_daily_audit.py --profile audit \
-  --publish-dir /usr/local/shenji/index \
-  --auth-state-dir /usr/local/shenji/auth \
-  --send-lark --lark-config /opt/aws-daily-audit/lark-config.json
-```
-
-EC2角色省略 `--profile audit`。密码模式要求 `--send-lark`、网页发布和 `--lark-mode overview`（默认）；错误组合会拒绝。Lark先显示新增/删除/修改数量，随后详情链接和访问密码，不显示用户名。首次启用后用浏览器无痕窗口访问HTTPS链接，应先看到密码页；输入Lark密码后才可读取报告。直接请求 `/audit/index.html`、CSS和JS也必须登录。登录会话最长8小时，下次日报成功切换密码时旧会话立即失效。
-
-5. 在现有北京时间08:01的cron命令中追加认证参数，完整示例（系统cron必须按北京时间运行或支持CRON_TZ）：
-
-```cron
-CRON_TZ=Asia/Shanghai
-1 8 * * * cd /opt/aws-daily-audit && /opt/aws-daily-audit/.venv/bin/python /opt/aws-daily-audit/aws_daily_audit.py --profile audit --publish-dir /usr/local/shenji/index --auth-state-dir /usr/local/shenji/auth --send-lark --lark-config /opt/aws-daily-audit/lark-config.json >> /opt/aws-daily-audit/audit-run.log 2>&1
-```
-
-每天第一次生成该日结束日期的报告时换码；同一天重跑沿用密码，并非每运行一次都换。脚本对归档、发布、换码、通知加进程锁，防止两个任务同时切换；不能用早于当前网页日期的报告回退密码。正常顺序为校验配置→锁内生成归档→发布网页→激活密码→发送Lark；生成新日密码无需每日重载Nginx或认证服务。
-
-Lark失败或网络超时时，新密码仍有效（消息可能已经到群）。修正配置后使用同一报表日期重跑，会重发同一个密码；跨日补发时加 `--date YYYY-MM-DD`，且不能早于网页当前日期。不要删除私有状态来重试。网页发布失败则不激活新密码、不发送Lark，旧密码保留；认证激活失败时也不发送Lark。未能发送返回3，认证准备/激活失败返回4，审计本身不完整仍优先返回2。恢复记录和认证文件不进入发布目录或交付ZIP。
+当前部署取消网页密码，使用文首 install.sh 流程。它将 /audit/ 恢复为 Nginx 静态页面，不使用 9998 认证服务；原前端 8890 转发保留。
 
 ### Lark 错误 19001 与本地配置诊断
 
@@ -319,18 +334,7 @@ Windows 将 Python 路径替换成 `.\.venv\Scripts\python.exe`。新版诊断�
 
 ## 五、每天北京时间08:01执行
 
-这里只提供服务器定时配置，不会在当前电脑或AWS创建实际任务。
-
-假设部署目录为`/opt/aws-daily-audit`，账号凭据归属于运行此任务的同一个系统用户。下面示例要求服务器cron使用北京时间，或使用支持`CRON_TZ`的实现（如Cronie）：
-
-```cron
-CRON_TZ=Asia/Shanghai
-1 8 * * * cd /opt/aws-daily-audit && /opt/aws-daily-audit/.venv/bin/python /opt/aws-daily-audit/aws_daily_audit.py --profile audit --publish-dir /usr/local/shenji/index --send-lark --lark-config /opt/aws-daily-audit/lark-config.json >> /opt/aws-daily-audit/audit-run.log 2>&1
-```
-
-部分cron不支持CRON_TZ，必须确认实际系统调度时区：如果cron按UTC运行，将时间字段改为`1 0 * * *`；如果按曼谷UTC+7运行，改为`1 7 * * *`。报表本身始终按北京时间计算，与服务器本地时区无关。
-
-EC2角色方式去掉`--profile audit`。确认执行用户对发布目录有写入权限，并监控非零退出码。Windows任务计划程序同样换算为北京时间08:01，使用虚拟环境Python和脚本的绝对路径。
+请使用文首的 install.sh 和 aws-user-audit.timer，不要另加 cron，以免重复采集和通知。安装不立即推送，后续停机恢复补跑最近一份已结束日报。
 
 ## 六、完整性、错误和数据边界
 
