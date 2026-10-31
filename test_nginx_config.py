@@ -71,6 +71,44 @@ class NginxCandidateTests(unittest.TestCase):
         self.assertIn(fallback, candidate)
         self.assertEqual(self.prepare(candidate), candidate)
 
+    def test_real_rds_route_names_and_frontend_are_preserved_verbatim(self):
+        # Route names match the user's headers; the bodies are local fixtures.
+        rds = '''    location = /audit_rds {
+        return 302 /audit_rds/;
+    }
+
+    location ^~ /audit_rds/ {
+        alias /srv/fixture-rds-reports/;
+        index index.html;
+        autoindex off;
+        # RDS 页面使用独立发布目录，不能被 AWS 日报安装器覆盖。
+    }
+'''
+        source = fixture(extra=rds)
+        candidate = self.prepare(source)
+        self.assertIn(rds, candidate)
+        self.assertIn(FRONTEND, candidate)
+        self.assertEqual(candidate.count('alias "/usr/local/shenji/index/";'), 1)
+        self.assertEqual(self.prepare(candidate), candidate)
+
+    def test_independent_paths_sharing_audit_letters_remain_untouched(self):
+        for path in ("/audit-other", "/audit-other/", "/auditing", "/audit-files/", "/audit_rds/"):
+            unrelated = ("    location ^~ " + path + " {\n"
+                         "        proxy_pass http://127.0.0.1:18890;\n"
+                         "        proxy_set_header X-Original-URI $request_uri;\n"
+                         "    }\n")
+            with self.subTest(path=path):
+                candidate = self.prepare(fixture(extra=unrelated))
+                self.assertIn(unrelated, candidate)
+                self.assertIn(FRONTEND, candidate)
+                self.assertEqual(self.prepare(candidate), candidate)
+
+    def test_actual_audit_subroutes_still_require_manual_review(self):
+        for modifier in ("", "=", "^~"):
+            route = "    location " + (modifier + " " if modifier else "") + "/audit/login { return 204; }\n"
+            with self.subTest(modifier=modifier), self.assertRaises(nginx.NginxConfigError):
+                self.prepare(fixture(extra=route))
+
     def test_quoted_and_commented_braces_do_not_change_block_boundaries(self):
         unusual = FRONTEND.replace("        proxy_http_version", (
             '        add_header X-Test "literal } { ; # and \\"quote\\"";\n'

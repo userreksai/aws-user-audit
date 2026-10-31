@@ -33,15 +33,18 @@ def main():
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }"""
+        rds_routes = """location = /audit_rds { return 302 /audit_rds/; }
+    location ^~ /audit_rds/ { alias /srv/example-rds-report/; index index.html; autoindex off; }"""
         original = """server {
     listen 8889;
     server_name zybocedata-pass.v668live.com;
     absolute_redirect off;
     location = /audit { return 302 /audit/; }
     location ^~ /audit/ { proxy_pass http://127.0.0.1:9998; }
-    """ + frontend + "\n}\n"
+    """ + frontend + "\n    " + rds_routes + "\n}\n"
         candidate = prepare_text(original, "zybocedata-pass.v668live.com", 8889, str(public))
         assert frontend in candidate
+        assert rds_routes in candidate
         assert "127.0.0.1:9998" not in candidate
         (root / "site.conf").write_text(candidate, encoding="utf-8")
         (root / "nginx.conf").write_text(

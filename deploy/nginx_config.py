@@ -215,7 +215,8 @@ def _routes(server):
             roots.append(child)
         if (modifier == "=" and path == "/audit") or (modifier in {"", "^~"} and path == "/audit/"):
             audit.append(child)
-        elif path.startswith("/audit") or (modifier in {"~", "~*"} and "audit" in path):
+        # URI boundaries matter: /audit_rds belongs to a separate application.
+        elif path == "/audit" or path.startswith("/audit/") or (modifier in {"~", "~*"} and "audit" in path):
             raise NginxConfigError("目标 server 存在额外或正则审计路由；请先人工确认，脚本不会覆盖未知路由。")
     frontend_proxies = [child for child in roots[0].children
                         if child.words and child.words[0] == "proxy_pass"] if len(roots) == 1 else []
