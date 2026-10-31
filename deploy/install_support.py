@@ -69,7 +69,7 @@ Group=root
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-WorkingDirectory=""" + unit_arg(install_dir) + "\nExecStart=" + " ".join(map(unit_arg, arguments)) + """
+WorkingDirectory=""" + install_dir + "\nExecStart=" + " ".join(map(unit_arg, arguments)) + """
 TimeoutStartSec=2h
 UMask=0077
 NoNewPrivileges=true

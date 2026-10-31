@@ -35,6 +35,7 @@ class SystemdUnitRenderTests(unittest.TestCase):
         self.assertIn("/usr/local/shenji/deploy/run_scheduled.py", service)
         self.assertIn("/usr/local/shenji/index", service)
         self.assertIn("/usr/local/shenji/lark-config.json", service)
+        self.assertIn("\nWorkingDirectory=/usr/local/shenji\n", service)
         self.assertRegex(service, r"(?m)^UMask=0*77\s*$")
         self.assertNotIn("--auth-state-dir", service)
         self.assertNotIn("audit_web.py", service)

@@ -10,7 +10,7 @@ Group=root
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-WorkingDirectory="/usr/local/shenji"
+WorkingDirectory=/usr/local/shenji
 ExecStart="/usr/local/shenji/.venv/bin/python" "/usr/local/shenji/deploy/run_scheduled.py" "--install-dir" "/usr/local/shenji" "--publish-dir" "/usr/local/shenji/index" "--profile" "audit" "--lark-config" "/usr/local/shenji/lark-config.json" "--report-url" "https://zybocedata-pass.v668live.com/audit/"
 TimeoutStartSec=2h
 UMask=0077
