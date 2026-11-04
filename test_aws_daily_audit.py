@@ -281,6 +281,29 @@ class RedactionTests(unittest.TestCase):
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_official_dashboard_label_stays_stable_across_success_and_failure(self):
+        labels = []
+        for failed in (False, True):
+            row = audit.normalize_event(sample_event(
+                eventName="PutDashboard", eventSource="monitoring.amazonaws.com",
+                errorCode="AccessDenied" if failed else "",
+            ), {}, ZoneInfo("Asia/Shanghai"))
+            labels.append(row["event_label"])
+            self.assertEqual(row["translation_status"], "reviewed")
+            self.assertEqual(row["category"], "修改")
+            self.assertEqual(row["failed"], failed)
+            self.assertNotIn("尝试", row["event_label"])
+            self.assertEqual(row["description"].startswith("尝试："), failed)
+            self.assertEqual(row["operation_reference"],
+                             "https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutDashboard.html")
+        self.assertEqual(labels, ["保存 CloudWatch 监控仪表盘配置（新建或整体覆盖）"] * 2)
+
+    def test_unknown_service_api_does_not_inherit_another_service_translation(self):
+        row = audit.normalize_event(sample_event(eventName="PutDashboard", eventSource="unknown.amazonaws.com"),
+                                    {}, ZoneInfo("Asia/Shanghai"))
+        self.assertEqual(row["translation_status"], "untranslated")
+        self.assertNotIn("CloudWatch", row["event_label"])
+
     def test_console_login_success_failure_and_unknown_results(self):
         for response, expected, failed in (({"ConsoleLogin": "Success"}, "登录成功", False),
                                             ({"ConsoleLogin": "Failure"}, "登录失败", True),

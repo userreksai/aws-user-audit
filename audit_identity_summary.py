@@ -1,11 +1,13 @@
 """Aggregate normalized CloudTrail identities without retaining event details.
 
-Role sessions are combined by their issuing role, not by a session name. This
-module never inspects request/response bodies, API names, resources or addresses.
+Role sessions are combined by their issuing role, not by a session name. The
+event summary uses normalized service/API names and pretranslated labels, never
+request/response bodies, resource identifiers, timestamps or addresses.
 """
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 CATEGORIES = ("新增", "修改", "删除", "Secrets Manager 查看", "登录信息", "其他操作")
 
@@ -109,4 +111,75 @@ def summarize_identities(rows):
         item["total"] += 1
     ordered = sorted(groups.items(), key=lambda pair: (pair[1]["identity_type"], pair[1]["actor"].casefold(),
                                                       pair[1]["actor"], repr(pair[0])))
+    return [item for _, item in ordered]
+
+
+def _event_metadata(row, source, name):
+    """Select a bounded label and official link, without examining event bodies."""
+    status = row.get("translation_status")
+    label = _text(row.get("event_label"))
+    if label.startswith("尝试："):
+        label = label[len("尝试："):].strip()
+    if not isinstance(status, str) or status not in {"reviewed", "official_zh", "untranslated"} or not label:
+        status = "untranslated"
+    if status == "untranslated":
+        label = "待补中文：" + source + " / " + name
+    reference = _text(row.get("operation_reference"))
+    if reference:
+        try:
+            url = urlsplit(reference)
+            if (url.scheme != "https" or url.hostname != "docs.aws.amazon.com"
+                    or url.username or url.password or url.port not in (None, 443)
+                    or url.query):
+                reference = ""
+        except ValueError:
+            reference = ""
+    return _label(label, 600), status, reference
+
+
+def summarize_identity_events(rows):
+    """Aggregate normalized service/API counts for each stable IAM identity.
+
+    Successful and failed calls share one row; ``failed`` is a subset of
+    ``total``. The original identity summary remains independent and unchanged.
+    Missing or untrusted translation metadata is visibly marked as untranslated.
+    """
+    if not isinstance(rows, list):
+        raise ValueError("身份事件汇总需要已规范化的事件数组")
+    groups, identities = {}, {}
+    ranks = {"reviewed": 0, "official_zh": 1, "untranslated": 2}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("category") not in CATEGORIES:
+            continue
+        identity_key, identity_type, actor = _identity(row)
+        if identity_key not in identities:
+            identities[identity_key] = actor
+        else:
+            identities[identity_key] = min(identities[identity_key], actor,
+                                           key=lambda value: (value.casefold(), value))
+        source = _text(row.get("source")) or _text(row.get("eventSource")) or "未提供服务"
+        name = _text(row.get("event_name")) or _text(row.get("eventName")) or "未知事件"
+        category = row["category"]
+        label, status, reference = _event_metadata(row, source, name)
+        key = (identity_key, source, name, category)
+        if key not in groups:
+            groups[key] = {"actor": actor, "identity_type": identity_type,
+                           "source": source, "event_name": name, "event_label": label,
+                           "translation_status": status, "operation_reference": reference,
+                           "category": category, "total": 0, "failed": 0}
+        item = groups[key]
+        # Metadata may differ after translating a mixed-version offline input;
+        # pick the most specific reviewed label deterministically, not by order.
+        current = (ranks[item["translation_status"]], item["event_label"],
+                   not bool(item["operation_reference"]), item["operation_reference"])
+        candidate = (ranks[status], label, not bool(reference), reference)
+        if candidate < current:
+            item.update(event_label=label, translation_status=status, operation_reference=reference)
+        item["total"] += 1
+        item["failed"] += row.get("failed") is True
+    for key, item in groups.items():
+        item["actor"] = identities[key[0]]
+    ordered = sorted(groups.items(), key=lambda pair: (pair[1]["identity_type"],
+        pair[1]["actor"].casefold(), pair[1]["actor"], pair[1]["source"],
+        pair[1]["event_name"], pair[1]["category"], repr(pair[0][0])))
     return [item for _, item in ordered]

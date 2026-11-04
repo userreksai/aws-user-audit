@@ -313,6 +313,7 @@ def parameter_summary(parameters):
 
 def normalize_event(event, lookup, zone):
     from audit_actions import lookup_action, describe_operation
+    from audit_event_catalog import translate_event
     category, basis = classify_event(event)
     actor, identity = actor_info(event, lookup)
     occurred = parse_time(event.get("eventTime") or lookup.get("EventTime"))
@@ -322,7 +323,10 @@ def normalize_event(event, lookup, zone):
     name = event.get("eventName", lookup.get("EventName", "未知 API"))
     action = lookup_action(event)
     operation = describe_operation(event) if category is not None else {}
-    description = action["description"] if action else ACTION_TEXT.get(name, ("调用 " + name))
+    translation = translate_event(event)
+    translated = translation["translation_status"] != "untranslated"
+    description = (translation["event_label"] if translated else
+                   action["description"] if action else ACTION_TEXT.get(name, ("调用 " + name)))
     parameters = redact(event.get("requestParameters"))
     summary = parameter_summary(parameters)
     resources = resource_names(event, lookup)
@@ -349,7 +353,7 @@ def normalize_event(event, lookup, zone):
             summary += "；MFA：" + {"yes": "已使用", "no": "未使用"}.get(str(mfa).lower(), str(mfa))
         if resources == ["日志未提供可识别资源；请查看请求参数"]:
             resources = ["—"]
-    if name.startswith("Put") and name not in ACTION_TEXT:
+    if name.startswith("Put") and name not in ACTION_TEXT and not translated:
         description += "（创建或覆盖）"
     if failed or partial:
         description = "尝试：" + description
@@ -359,9 +363,10 @@ def normalize_event(event, lookup, zone):
             "account_id": event.get("recipientAccountId", ""), "region": event.get("awsRegion") or event.get("_query_region", ""),
             "source": event.get("eventSource", ""), "event_name": name, "category": category,
             "classification_basis": basis, "description": description, "resources": resources,
+            "event_label": translation["event_label"], "translation_status": translation["translation_status"],
             "operation_kind": action["kind"] if action else "resource_change" if category in {"新增", "修改", "删除"} else "other",
             "api_description": operation.get("api_description", ""),
-            "operation_reference": action["reference"] if action else operation.get("operation_reference", ""),
+            "operation_reference": translation["operation_reference"] or (action["reference"] if action else operation.get("operation_reference", "")),
             "parameters": parameters, "parameter_summary": summary, "login_details": login_details,
             "response": redact(event.get("responseElements")),
             "result": result, "failed": failed or partial, "error_code": event.get("errorCode", ""),
@@ -490,7 +495,7 @@ def build_report(events, *, audit_date, timezone_name, start, end, account_id="u
     zone = ZoneInfo(timezone_name)
     period_label = (f"北京时间前一天{start.astimezone(zone):%H:%M}至报表日{end.astimezone(zone):%H:%M}（{hours:g}小时）"
                     if daily_window else "当日截至查询时刻" if in_progress else "完整自然日")
-    from audit_identity_summary import summarize_identities
+    from audit_identity_summary import summarize_identities, summarize_identity_events
     return {"metadata": {"audit_date": audit_date, "timezone": timezone_name, "account_id": account_id,
             "in_progress": in_progress, "window_mode": window_mode,
             "period_label": period_label, "window_hours": hours,
@@ -507,7 +512,7 @@ def build_report(events, *, audit_date, timezone_name, start, end, account_id="u
             "failed_or_partial": sum(row["failed"] for row in rows),
             "counts": {category: counts[category] for category in CATEGORIES},
             "count_note": "按独立 CloudTrail EventID 计数，不等于人工操作次数；批量 Secret 读取可能产生多个事件。"},
-            "actors": summarize_identities(rows), "events": rows}
+            "actors": summarize_identities(rows), "actor_events": summarize_identity_events(rows), "events": rows}
 
 
 def render_html(report):

@@ -1,8 +1,8 @@
 """Render a private Chinese CloudTrail report without HTML or external services.
 
-The portable attachment renders whitelisted AWS account metadata and precomputed
-IAM user/role counts. Individual events, API names and request contents are never
-read or serialized by this module.
+The portable attachment renders whitelisted AWS account metadata, identity
+counts, and precomputed identity/event counts. Individual event records and
+request contents are never read or serialized by this module.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ WIDTH = 176 * mm
 IDENTITY_TYPES = {"IAMUser": "IAM 用户", "Role": "角色", "Root": "Root",
                   "AWSService": "AWS 服务", "IdentityCenterUser": "身份中心用户",
                   "FederatedUser": "联合身份用户", "Unknown": "未知身份"}
+TRANSLATION_STATUSES = {"reviewed", "official_zh", "untranslated"}
 
 
 def _font(font_path=None):
@@ -82,6 +83,28 @@ def _count(value):
     return value
 
 
+def _valid_label(value, maximum):
+    return (isinstance(value, str) and bool(value.strip()) and len(value) <= maximum
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value))
+
+
+def _identity_totals(rows):
+    """Compare displayed identities without relying on private identity keys."""
+    result = {}
+    for row in rows:
+        key = (row["identity_type"], row["actor"])
+        values = result.setdefault(key, {"total": 0, "failed": 0,
+                                         "counts": {category: 0 for category in CATEGORIES}})
+        values["total"] += row["total"]
+        values["failed"] += row["failed"]
+        if "category" in row:
+            values["counts"][row["category"]] += row["total"]
+        else:
+            for category in CATEGORIES:
+                values["counts"][category] += row["counts"][category]
+    return result
+
+
 def _summary(report):
     """Copy only the display whitelist; never traverse the events collection."""
     if not isinstance(report, dict) or not isinstance(report.get("metadata"), dict):
@@ -105,8 +128,7 @@ def _summary(report):
         if not isinstance(raw_actor, dict):
             raise ValueError("PDF 身份汇总必须为对象数组。")
         actor, identity_type = raw_actor.get("actor"), raw_actor.get("identity_type")
-        if (not isinstance(actor, str) or not actor.strip() or len(actor) > 1024
-                or any(ord(char) < 32 or ord(char) == 127 for char in actor)
+        if (not _valid_label(actor, 1024)
                 or not isinstance(identity_type, str) or identity_type not in IDENTITY_TYPES
                 or not isinstance(raw_actor.get("counts"), dict)):
             raise ValueError("PDF 身份名称、类型或分类汇总无效。")
@@ -123,10 +145,40 @@ def _summary(report):
         actor_failed += row_failed
     if actor_counts != counts or actor_total != total or actor_failed != failed:
         raise ValueError("PDF 各身份汇总与 AWS 账号总计不一致，请重新生成报告。")
+    raw_actor_events = report.get("actor_events")
+    if raw_actor_events is None and total == 0:
+        raw_actor_events = []
+    if not isinstance(raw_actor_events, list) or (total > 0 and not raw_actor_events):
+        raise ValueError("报告缺少用户操作与事件汇总，请使用新版程序重新生成报告。")
+    actor_events = []
+    for raw_event in raw_actor_events:
+        if not isinstance(raw_event, dict):
+            raise ValueError("PDF 用户事件汇总必须为对象数组。")
+        actor, identity_type = raw_event.get("actor"), raw_event.get("identity_type")
+        source, event_name = raw_event.get("source"), raw_event.get("event_name")
+        event_label, status = raw_event.get("event_label"), raw_event.get("translation_status")
+        category = raw_event.get("category")
+        if (not _valid_label(actor, 1024)
+                or not isinstance(identity_type, str) or identity_type not in IDENTITY_TYPES
+                or not _valid_label(source, 256) or not _valid_label(event_name, 256)
+                or not _valid_label(event_label, 8192)
+                or not isinstance(status, str) or status not in TRANSLATION_STATUSES
+                or not isinstance(category, str) or category not in CATEGORIES):
+            raise ValueError("PDF 用户事件汇总的身份、事件、翻译状态或分类无效。")
+        row_total, row_failed = _count(raw_event.get("total")), _count(raw_event.get("failed"))
+        if row_failed > row_total:
+            raise ValueError("PDF 用户事件汇总的失败次数超过调用次数。")
+        actor_events.append({"actor": actor, "identity_type": identity_type, "source": source,
+                             "event_name": event_name, "event_label": event_label,
+                             "translation_status": status, "category": category,
+                             "total": row_total, "failed": row_failed})
+    if _identity_totals(actor_events) != _identity_totals(actors):
+        raise ValueError("PDF 用户事件汇总与各身份分类、调用或失败总计不一致，请重新生成报告。")
     summary = {key: meta.get(key) for key in (
         "account_id", "account_name", "audit_date", "generated_at",
         "window_start_local", "window_end_local_exclusive")}
-    summary.update(counts=counts, total=total, failed=failed, actors=actors, complete=meta["complete"],
+    summary.update(counts=counts, total=total, failed=failed, actors=actors,
+                   actor_events=actor_events, complete=meta["complete"],
                    offline=meta.get("offline") is True,
                    demo=meta.get("demo") is True or report.get("demo") is True)
     return summary
@@ -141,8 +193,8 @@ def _label(value, maximum=120):
 def render_report_pdf(report: dict, path: Path, font_path: str | None = None) -> Path:
     """Write one account's summary-only PDF atomically, with mode 0600.
 
-    Only metadata and precomputed identity-count whitelists are rendered. The
-    events collection is never inspected by this function.
+    Only metadata and precomputed identity/event-count whitelists are rendered.
+    The events collection is never inspected by this function.
     """
     summary = _summary(report)
     font = _font(font_path)
@@ -203,7 +255,34 @@ def render_report_pdf(report: dict, path: Path, font_path: str | None = None) ->
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
     ]))
-    story.extend([table, Spacer(1, 4 * mm),
+    story.append(table)
+    story.append(p("用户操作与事件汇总", "section"))
+    event_labels = ["账号 / 角色", "身份类型", "中文事件", "调用次数", "失败次数"]
+    event_rows = [[p(label, "head") for label in event_labels]]
+    for event in summary["actor_events"]:
+        label = event["event_label"]
+        if event["translation_status"] == "untranslated":
+            label = "待补中文：" + event["event_name"] + "\n服务：" + event["source"]
+        event_rows.append([p(event["actor"], "cell"),
+                           p(IDENTITY_TYPES[event["identity_type"]], "cell"), p(label, "cell"),
+                           p(f"{event['total']:,}", "center"), p(f"{event['failed']:,}", "center")])
+    if summary["actor_events"]:
+        event_table = LongTable(event_rows, colWidths=[36 * mm, 20 * mm, 90 * mm, 15 * mm, 15 * mm],
+                                repeatRows=1, splitInRow=1, hAlign="LEFT")
+        event_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PALE]),
+            ("GRID", (0, 0), (-1, -1), 0.4, LINE),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(event_table)
+    else:
+        story.append(p("本报告没有可汇总的用户事件。", "sub"))
+    story.extend([Spacer(1, 4 * mm),
                   p(f"报告事件 {summary['total']:,} 条；其中失败或含失败响应 {summary['failed']:,} 条。"),
                   p("Secret 查看指 Secrets Manager 查看；失败数是分类次数的子集。", "sub"),
                   p("同一角色的会话按角色合并统计，角色身份不直接认定为自然人。", "sub"),
