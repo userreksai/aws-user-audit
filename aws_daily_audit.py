@@ -647,9 +647,9 @@ def main(argv=None):
     parser.add_argument("--lark-mode", choices=["overview", "summary", "full"], default="overview", help="Lark 默认数量总览和详情链接；覆盖配置中的 message_mode")
     parser.add_argument("--report-url", default="https://zybocedata-pass.v668live.com/audit/", help="Lark 通知中的详细报告链接")
     publication = parser.add_mutually_exclusive_group()
-    publication.add_argument("--publish-dir", help="复制 HTML 为目录中的 index.html；Linux 联网运行默认 /usr/local/shenji/index/，离线模式默认不发布")
+    publication.add_argument("--publish-dir", help="复制 HTML 为目录中的 index.html；Linux 联网运行默认 /usr/local/aws-user-audit/index/，离线模式默认不发布")
     publication.add_argument("--no-publish", action="store_true", help="仅保存日期归档，不更新 index.html")
-    parser.add_argument("--auth-state-dir", help="启用单密码访问；私有状态目录（例如 /usr/local/shenji/auth），必须同时发布网页、--send-lark 并使用 overview")
+    parser.add_argument("--auth-state-dir", help="启用单密码访问；私有状态目录（例如 /usr/local/aws-user-audit/auth），必须同时发布网页、--send-lark 并使用 overview")
     args = parser.parse_args(argv)
     try:
         if args.auth_state_dir and (not args.send_lark or args.no_publish or args.lark_mode != "overview"
@@ -706,7 +706,7 @@ def main(argv=None):
         if args.no_publish:
             publish_dir = None
         elif publish_dir is None and os.name == "posix" and not args.input_file:
-            publish_dir = "/usr/local/shenji/index/"
+            publish_dir = "/usr/local/aws-user-audit/index/"
         if args.auth_state_dir:
             if not publish_dir:
                 raise ValueError("密码认证需要 --publish-dir 指定网页目录。")

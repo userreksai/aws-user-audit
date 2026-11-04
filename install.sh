@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Install/update the audit job without running it or sending a Lark message.
+# Install/update the audit job without querying AWS or sending notifications.
 set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ORIGINAL_DIR=$PWD
-INSTALL_DIR=/usr/local/shenji
+INSTALL_DIR=/usr/local/aws-user-audit
 PUBLISH_DIR=
 NGINX_CONFIG=/etc/nginx/conf.d/zybocedata-pass.v668live.com.conf
-PROFILE=audit
-LARK_CONFIG=
+CONFIG_PATH=
 PYTHON=python3
 DRY_RUN=0
 UPDATE=0
 SERVER_NAME=zybocedata-pass.v668live.com
-REPORT_URL=https://zybocedata-pass.v668live.com/audit/
 UNIT_DIR=/etc/systemd/system
 TIMER_STAMP=/var/lib/systemd/timers/stamp-aws-user-audit.timer
 WORK_DIR=
@@ -37,17 +35,16 @@ STAGING_FILES=()
 usage() {
     cat <<'HELP'
 Usage: sudo bash install.sh [options]
-  --install-dir DIR   Code/venv directory (default: /usr/local/shenji)
+  --install-dir DIR   Code/venv directory (default: /usr/local/aws-user-audit)
   --publish-dir DIR   Static report directory (default: INSTALL_DIR/index)
   --nginx-config FILE Existing host Nginx vhost to patch
-  --profile NAME      Existing root AWS profile (default: audit)
-  --lark-config FILE  Existing private Lark JSON (default: INSTALL_DIR/lark-config.json)
+  --config FILE       Private unified JSON/JSONC (default: INSTALL_DIR/aws-audit-config.json)
   --python COMMAND    System Python >=3.10 used to create the venv
   --update            Clone public main into a temporary checkout first
   --dry-run           Render/print a local plan; no root, network or system changes
   --help              Show this help
 
-The installer never starts aws-user-audit.service or calls AWS/Lark.
+The installer never starts aws-user-audit.service or calls AWS/SMTP/Lark.
 The timer runs daily at 08:01 Asia/Shanghai with reboot catch-up enabled.
 Its timestamp is advanced at install time so installation itself does not run a report.
 HELP
@@ -62,8 +59,7 @@ while (($#)); do
         --install-dir) need_value "$@"; INSTALL_DIR=$2; shift 2 ;;
         --publish-dir) need_value "$@"; PUBLISH_DIR=$2; shift 2 ;;
         --nginx-config) need_value "$@"; NGINX_CONFIG=$2; shift 2 ;;
-        --profile) need_value "$@"; PROFILE=$2; shift 2 ;;
-        --lark-config) need_value "$@"; LARK_CONFIG=$2; shift 2 ;;
+        --config) need_value "$@"; CONFIG_PATH=$2; shift 2 ;;
         --python) need_value "$@"; PYTHON=$2; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --update) UPDATE=1; shift ;;
@@ -73,15 +69,18 @@ while (($#)); do
 done
 
 [[ -n $PUBLISH_DIR ]] || PUBLISH_DIR=$INSTALL_DIR/index
-[[ -n $LARK_CONFIG ]] || LARK_CONFIG=$INSTALL_DIR/lark-config.json
-for setting in INSTALL_DIR PUBLISH_DIR NGINX_CONFIG LARK_CONFIG; do
+[[ -n $CONFIG_PATH ]] || CONFIG_PATH=$INSTALL_DIR/aws-audit-config.json
+for setting in INSTALL_DIR PUBLISH_DIR NGINX_CONFIG CONFIG_PATH; do
     value=${!setting}
     [[ $value == /* ]] || value=$ORIGINAL_DIR/$value
     [[ $value != *$'\n'* && $value != *$'\r'* ]] || die '路径不能包含换行。'
     printf -v "$setting" '%s' "${value%/}"
 done
 case $INSTALL_DIR in ''|/|/usr|/usr/local|/etc|/var|/bin|/sbin|/root) die '请指定专用安装目录。' ;; esac
-[[ $PROFILE != *$'\n'* && $PROFILE != *$'\r'* ]] || die 'profile 名称无效。'
+for marker in rds_multi.py rds_config.py; do
+    [[ ! -e $INSTALL_DIR/$marker && ! -L $INSTALL_DIR/$marker ]] \
+        || die '安装目录包含 RDS 项目标识；请使用独立 AWS 账号审计目录，不能覆盖 RDS。'
+done
 
 atomic_file() {
     local source=$1 target=$2 reference=${3:-} mode=${4:-0644} stage
@@ -188,7 +187,7 @@ finish() {
         if [[ $marker == "aws-user-audit-installer:$$" ]]; then rm -rf -- "$WORK_DIR"; fi
     fi
     if ((status != 0)); then
-        say '未执行日报，也未由安装器发送 Lark。修复上述问题后可重跑安装。' >&2
+        say '未执行日报，也未由安装器发送邮件或 Lark。修复上述问题后可重跑安装。' >&2
     fi
     exit "$status"
 }
@@ -202,13 +201,14 @@ if ((DRY_RUN)); then
     command -v "$PYTHON" >/dev/null 2>&1 || die 'dry-run 需要现有 Python；不会自动安装。'
     [[ -f $SOURCE_DIR/deploy/install_support.py ]] || die '缺少部署 helper，请使用完整代码目录。'
     "$PYTHON" "$SOURCE_DIR/deploy/install_support.py" render \
-        --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" --profile "$PROFILE" \
-        --lark-config "$LARK_CONFIG" --report-url "$REPORT_URL" --output-dir "$WORK_DIR/units"
+        --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" \
+        --config "$CONFIG_PATH" --output-dir "$WORK_DIR/units"
     say '【dry-run】仅渲染临时计划；未联网、未安装软件、未修改 Nginx 或 systemd。'
     ((UPDATE == 0)) || say '实际 --update 时将临时 clone 公共仓库 main；本次使用本地代码渲染。'
     say "代码目录：$INSTALL_DIR"
     say "Python 环境：$INSTALL_DIR/.venv"
     say "网页目录：$PUBLISH_DIR"
+    say "统一私有配置：$CONFIG_PATH"
     say "Nginx 配置：$NGINX_CONFIG"
     say 'Nginx 只替换 /audit/；原前端 / → 8890 和其他配置保留。'
     say '定时：每天北京时间 08:01，启用停机补跑；安装当次不执行日报。'
@@ -243,14 +243,14 @@ case $active_state in active|activating|reloading|deactivating) die '日报服�
 cron_match=0
 if command -v crontab >/dev/null 2>&1; then
     crontab -l >"$WORK_DIR/root-crontab" 2>/dev/null || true
-    if awk '/^[[:space:]]*#/ {next} /aws_daily_audit[.]py/ {found=1} END {exit !found}' "$WORK_DIR/root-crontab"; then cron_match=1; fi
+    if awk '/^[[:space:]]*#/ {next} /aws_daily_audit[.]py|aws_audit_multi[.]py/ {found=1} END {exit !found}' "$WORK_DIR/root-crontab"; then cron_match=1; fi
 fi
 shopt -s nullglob
 for cron_file in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* /var/spool/cron/*; do
     [[ -f $cron_file && -r $cron_file ]] || continue
-    if awk '/^[[:space:]]*#/ {next} /aws_daily_audit[.]py/ {found=1} END {exit !found}' "$cron_file"; then cron_match=1; fi
+    if awk '/^[[:space:]]*#/ {next} /aws_daily_audit[.]py|aws_audit_multi[.]py/ {found=1} END {exit !found}' "$cron_file"; then cron_match=1; fi
 done
-((cron_match == 0)) || die '发现旧 cron 引用 aws_daily_audit.py，请先手工移除旧定时项以免重复执行，再重跑；安装器没有修改 cron。'
+((cron_match == 0)) || die '发现旧 cron 引用 AWS 审计程序，请先手工移除旧定时项以免重复执行，再重跑；安装器没有修改 cron。'
 
 if ((UPDATE)); then
     command -v git >/dev/null 2>&1 || die '--update 需要 git；请先安装 git。'
@@ -259,8 +259,9 @@ if ((UPDATE)); then
     SOURCE_DIR=$WORK_DIR/source
 fi
 
-RUNTIME_FILES=(aws_daily_audit.py lark_notify.py requirements.txt install.sh README.md
-    iam-policy.json iam-policy-single-region.json lark-config.example.json
+RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_config.py audit_mail.py audit_mail_delivery.py
+    audit_pdf.py audit_alerts.py lark_notify.py requirements.txt install.sh README.md
+    iam-policy.json iam-policy-single-region.json aws-audit-config.example.json
     deploy/install_support.py deploy/run_scheduled.py deploy/nginx_config.py)
 for relative in "${RUNTIME_FILES[@]}"; do
     [[ -f $SOURCE_DIR/$relative && ! -L $SOURCE_DIR/$relative ]] || die "源码包缺少普通文件：$relative。"
@@ -283,8 +284,8 @@ if ! "$PYTHON" -c 'import venv, ensurepip' >/dev/null 2>&1; then
 fi
 
 "$PYTHON" "$SOURCE_DIR/deploy/install_support.py" render \
-    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" --profile "$PROFILE" \
-    --lark-config "$LARK_CONFIG" --report-url "$REPORT_URL" --output-dir "$WORK_DIR/units"
+    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" \
+    --config "$CONFIG_PATH" --output-dir "$WORK_DIR/units"
 cp -p -- "$NGINX_CONFIG" "$WORK_DIR/nginx-original.conf"
 "$PYTHON" "$SOURCE_DIR/deploy/nginx_config.py" plan --nginx-config "$WORK_DIR/nginx-original.conf" \
     --publish-dir "$PUBLISH_DIR" --server-name "$SERVER_NAME" --listen-port 8889 \
@@ -343,13 +344,14 @@ for relative in "${RUNTIME_FILES[@]}"; do
     atomic_file "$SOURCE_DIR/$relative" "$destination" '' "$mode"
 done
 
-if [[ ! -e $LARK_CONFIG ]]; then
-    [[ -d $(dirname -- "$LARK_CONFIG") ]] || die 'Lark 配置父目录不存在；请先创建并放入私有配置。'
-    install -m 0600 -- "$INSTALL_DIR/lark-config.example.json" "$LARK_CONFIG"
-    die "已创建私有配置模板：$LARK_CONFIG。请填写真实 Webhook 后重跑；未启用定时器。"
+if [[ ! -e $CONFIG_PATH ]]; then
+    [[ ! -L $CONFIG_PATH ]] || die '统一配置不能为符号链接。'
+    [[ -d $(dirname -- "$CONFIG_PATH") ]] || die '统一配置父目录不存在；请先创建并放入私有配置。'
+    install -m 0600 -- "$INSTALL_DIR/aws-audit-config.example.json" "$CONFIG_PATH"
+    die "已创建私有配置模板：$CONFIG_PATH。请填写启用账号及邮件配置后重跑；未启用定时器。"
 fi
-[[ -f $LARK_CONFIG && ! -L $LARK_CONFIG ]] || die 'Lark 配置必须为普通私有文件。'
-chmod 0600 -- "$LARK_CONFIG"
+[[ -f $CONFIG_PATH && ! -L $CONFIG_PATH ]] || die '统一配置必须为普通私有文件。'
+chmod 0600 -- "$CONFIG_PATH"
 [[ ! -L $INSTALL_DIR/.venv ]] || die '.venv 不能为符号链接。'
 if [[ ! -x $INSTALL_DIR/.venv/bin/python ]]; then
     "$PYTHON" -m venv "$INSTALL_DIR/.venv"
@@ -357,7 +359,7 @@ fi
 VENV_PYTHON=$INSTALL_DIR/.venv/bin/python
 "$VENV_PYTHON" -m pip install -r "$INSTALL_DIR/requirements.txt"
 "$VENV_PYTHON" "$INSTALL_DIR/deploy/install_support.py" preflight \
-    --install-dir "$INSTALL_DIR" --profile "$PROFILE" --lark-config "$LARK_CONFIG"
+    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" --config "$CONFIG_PATH"
 
 systemd-analyze verify "$WORK_DIR/units/aws-user-audit.service" "$WORK_DIR/units/aws-user-audit.timer" \
     >"$WORK_DIR/systemd-verify.log" 2>&1 || die 'systemd 单元校验失败；系统配置尚未变更。'
@@ -400,10 +402,11 @@ if [[ $(systemctl show -p LoadState --value aws-audit-web.service 2>/dev/null ||
 fi
 systemctl list-timers --all --no-pager aws-user-audit.timer >"$WORK_DIR/timer-status"
 COMMITTED=1
-say '安装完成；本次没有立即执行日报或发送 Lark。'
+say '安装完成；本次没有立即执行日报或发送邮件/Lark。'
 say "代码：$INSTALL_DIR"
 say "Python：$VENV_PYTHON"
 say "网页：$PUBLISH_DIR/index.html"
+say "统一私有配置：$CONFIG_PATH"
 say "Nginx 备份：$NGINX_BACKUP"
 say "单元备份：$BACKUP_DIR"
 say '下一次执行（北京时间每天 08:01）：'

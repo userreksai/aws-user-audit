@@ -1,5 +1,5 @@
 [Unit]
-Description=AWS daily account operation audit and Lark overview
+Description=AWS daily multi-account operation audit and PDF email
 Wants=network-online.target
 After=network-online.target
 
@@ -10,8 +10,8 @@ Group=root
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-WorkingDirectory=/usr/local/shenji
-ExecStart="/usr/local/shenji/.venv/bin/python" "/usr/local/shenji/deploy/run_scheduled.py" "--install-dir" "/usr/local/shenji" "--publish-dir" "/usr/local/shenji/index" "--profile" "audit" "--lark-config" "/usr/local/shenji/lark-config.json" "--report-url" "https://zybocedata-pass.v668live.com/audit/"
+WorkingDirectory=/usr/local/aws-user-audit
+ExecStart="/usr/local/aws-user-audit/.venv/bin/python" "/usr/local/aws-user-audit/deploy/run_scheduled.py" "--install-dir" "/usr/local/aws-user-audit" "--config" "/usr/local/aws-user-audit/aws-audit-config.json"
 TimeoutStartSec=2h
 UMask=0077
 NoNewPrivileges=true

@@ -1,0 +1,106 @@
+// 私有配置：复制为 aws-audit-config.json，填写后 chmod 600；不要提交到 Git。
+// 支持 JSONC 注释；账号和邮件字段与 RDS 项目同名。此项目保留 25 小时窗口和 08:01 定时。
+{
+  // 相对路径以本配置所在目录为起点。安装默认目录为 /usr/local/aws-user-audit。
+  "OUTPUT_DIRECTORY": "reports",
+  "PUBLISH_DIRECTORY": "index",
+  "STATE_DIRECTORY": ".state",
+  "REPORT_URL": "https://zybocedata-pass.v668live.com/audit/",
+  "TIMEZONE": "Asia/Shanghai",
+  // 并发账号数 1-32；各账号内部按区域分页、限速读取 CloudTrail。
+  "ACCOUNT_CONCURRENCY": 7,
+  // 自动邮件每天最多一封；0 只更新本地报告，1 开启自动邮件。
+  "AUTO_MAIL_MAX_PER_DAY": 1,
+  // 收件人与抄送填写真实邮箱数组；支持多个地址。
+  "SMTP_HOST": "",
+  "SMTP_PORT": 465,
+  "SMTP_SECURITY": "ssl",
+  "SMTP_TIMEOUT": 30,
+  "SMTP_USERNAME": "", // 完整发件邮箱，同时作为 SMTP 登录账号。
+  "SMTP_AUTH_CODE": "", // 邮箱授权码或密码，勿放进代码或网页。
+  "MAIL_RECIPIENTS": [],
+  "MAIL_CC": [],
+  "MAIL_SUBJECT": "AWS账号操作审计日报",
+  "MAIL_SENDER_NAME": "",
+  // 可选中文 TTF/TTC；留空自动寻找文泉驿或宋体，否则使用中文 CID 字体。
+  "PDF_FONT_PATH": "",
+  // Lark 仅发采集、生成、网页发布或邮件投递异常。填写机器人地址后改为 true。
+  "LARK_ALERTS_ENABLED": false,
+  "LARK_WEBHOOK_URL": "",
+  "LARK_SIGNING_SECRET": "",
+  // 不自动删除历史报告。此处不会继承 RDS 的 SQL、IP过滤、分段采集或保留期设置。
+  // NAME 和 ACCOUNT_ID 分别唯一。先替换账号1的占位ID，其余账号配置好后再 ENABLED=true。
+  // profile 和 Key 二选一；都留空使用默认凭据链。临时凭据需填写 Token。
+  "ACCOUNTS": [
+    {
+      "NAME": "account-1",
+      "ACCOUNT_ID": "000000000001",
+      "ENABLED": true,
+      "AWS_PROFILE": "audit",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    },
+    {
+      "NAME": "account-2",
+      "ACCOUNT_ID": "000000000002",
+      "ENABLED": false,
+      "AWS_PROFILE": "",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    },
+    {
+      "NAME": "account-3",
+      "ACCOUNT_ID": "000000000003",
+      "ENABLED": false,
+      "AWS_PROFILE": "",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    },
+    {
+      "NAME": "account-4",
+      "ACCOUNT_ID": "000000000004",
+      "ENABLED": false,
+      "AWS_PROFILE": "",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    },
+    {
+      "NAME": "account-5",
+      "ACCOUNT_ID": "000000000005",
+      "ENABLED": false,
+      "AWS_PROFILE": "",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    },
+    {
+      "NAME": "account-6",
+      "ACCOUNT_ID": "000000000006",
+      "ENABLED": false,
+      "AWS_PROFILE": "",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    },
+    {
+      "NAME": "account-7",
+      "ACCOUNT_ID": "000000000007",
+      "ENABLED": false,
+      "AWS_PROFILE": "",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    }
+  ]
+}

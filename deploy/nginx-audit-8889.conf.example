@@ -11,7 +11,7 @@ server {
 
     location ^~ /audit/ {
         absolute_redirect off;
-        alias "/usr/local/shenji/index/";
+        alias "/usr/local/aws-user-audit/index/";
         index index.html;
         autoindex off;
         expires -1;

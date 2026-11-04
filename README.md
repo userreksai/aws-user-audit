@@ -1,23 +1,40 @@
-# AWS 账号每日审计报告
+# AWS 多账号操作审计：PDF 邮件日报
 
-## 已确认的服务器部署方式（使用 install.sh）
+按账号读取 CloudTrail 管理事件，每账号生成一份中文 PDF，所有启用账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成、发布或邮件投递失败时通知群。
 
-本次部署取消网页密码认证，报告由现有 Nginx 直接提供。安装/更新过程只配置服务和定时器，不查询 AWS，也不推送 Lark。
+保留原有操作明细：谁、北京时间几点、调用什么 API、涉及什么资源、提交什么参数以及请求结果。普通查看忽略，Secrets Manager 查看保留；新增、删除、修改、登录及其他操作分别列出。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
+
+## 已确认的部署配置
 
 | 项目 | 配置 |
 | --- | --- |
-| GitHub 仓库 | https://github.com/userreksai/aws-user-audit |
-| 代码 / Python 虚拟环境 | `/usr/local/shenji/` / `/usr/local/shenji/.venv/` |
-| 网页发布位置 | `/usr/local/shenji/index/index.html`，同目录包含 CSS 和 JS |
-| 日期归档 | `/usr/local/shenji/reports/<账号>/<报表日期>/` |
+| 安装目录 | `/usr/local/aws-user-audit` |
+| Python 虚拟环境 | `/usr/local/aws-user-audit/.venv` |
+| 统一私有 JSONC | `/usr/local/aws-user-audit/aws-audit-config.json` |
+| 归档 | `/usr/local/aws-user-audit/reports/<账号ID>/<报表结束日期>/` |
+| 网页 | `/usr/local/aws-user-audit/index/index.html` 为多账号总览；点击账号进入明细 |
+| 单账号网页 | `/usr/local/aws-user-audit/index/<账号ID>/index.html` |
+| 邮件状态 | `/usr/local/aws-user-audit/.state/`，不放进网页目录 |
 | Nginx 配置 | `/etc/nginx/conf.d/zybocedata-pass.v668live.com.conf` |
-| Nginx 入口 / 原前端 | `8889` / `127.0.0.1:8890`，原前端转发保持原文 |
-| 审计路径 / 详情链接 | `/audit/` / https://zybocedata-pass.v668live.com/audit/ |
-| AWS / Lark | root 原有 profile `audit` / `/usr/local/shenji/lark-config.json` |
-| 每日任务 | 北京时间 `08:01`，不依赖服务器系统时区 |
-| 停机恢复 | 补跑最近一份已结束的日报，不自动回填所有缺失日期 |
+| 网站入口 | `8889`、`/audit/`，详情链接 https://zybocedata-pass.v668live.com/audit/ |
+| 原前端 / RDS 路由 | `/` → `127.0.0.1:8890` 和 `/audit_rds/` 原文保留 |
+| 每日执行 | **北京时间 08:01**，不依赖服务器系统时区 |
+| 查询窗口 | **昨日 07:00 ≤ 事件时间 < 今日 08:00**，25 小时，相邻日报重叠 1 小时 |
+| 停机恢复 | 只补最近一份已结束的日报；08:00 前恢复选择前一结束日 |
 
-首次部署，从仓库克隆到一个新的源码目录，再执行安装脚本。不要把仓库克隆到已经存放配置、虚拟环境和报告的目录中：
+网页密码已取消。**安装/更新只配置服务与定时器，不查询 AWS，不发送邮件或 Lark。** 没有成功执行过报告时网页目录为空是正常现象。
+
+## 安装和更新
+
+已有源码目录先更新，执行安装器：
+
+```bash
+cd /opt/aws-user-audit-src
+sudo git pull --ff-only
+sudo bash install.sh
+```
+
+首次没有源码时：
 
 ```bash
 git clone https://github.com/userreksai/aws-user-audit.git /opt/aws-user-audit-src
@@ -25,64 +42,134 @@ cd /opt/aws-user-audit-src
 sudo bash install.sh
 ```
 
-安装器适用于 Linux + systemd + 宿主机 Nginx。它使用现有 Python 3.10+；Debian/Ubuntu 缺少 Python 或 venv 时安装必要依赖，不安装或重启 Nginx。AWS 凭据继续使用 root 的原有 profile `audit`，不会生成、索取或打印密钥。Lark 配置必须保存在服务器私有文件中；仓库只提供 `lark-config.example.json`，不会包含真实 Webhook。缺少配置或本地检查失败时，安装停止且不会启用任务。
-
-预览部署计划（不改系统、不联网、不发送通知）：
+`/opt/aws-user-audit-src` 是源码目录，实际运行目录是 `/usr/local/aws-user-audit`。安装器首次会创建权限 `0600` 的私有配置模板，然后停止；填写配置后重跑安装。不要将真实 Key、授权码或机器人 Webhook 提交到 GitHub。
 
 ```bash
-bash install.sh --dry-run
+sudo nano /usr/local/aws-user-audit/aws-audit-config.json
+sudo chmod 600 /usr/local/aws-user-audit/aws-audit-config.json
+cd /opt/aws-user-audit-src
+sudo bash install.sh
 ```
 
-以后从 GitHub 更新代码：
+配置通过后安装/更新 `aws-user-audit.service` 和 `aws-user-audit.timer`，同名旧定时任务被替换，不另建一套双跑。以后也可用：
 
 ```bash
-sudo bash /usr/local/shenji/install.sh --update
-```
-
-更新使用临时目录获取 `main` 并复制明确的代码文件，保留 `lark-config.json`、`.aws`、`.venv`、`reports/`、`index/` 和旧认证状态。不会执行 `git reset`、删除现有配置或将示例数据发布到线上。
-
-安装器只修改已确认配置文件内唯一匹配 `server_name zybocedata-pass.v668live.com` 和 `listen 8889` 的两个审计 location。原有 `location /`、到 `8890` 的转发、请求头及其他业务配置逐字保留；若匹配不唯一、有未展开的 server 级 include、未知审计路由或原前端缺失，会停止并给出提示。修改前保存备份，`nginx -t` 通过后才 reload，检查或 reload 失败会恢复原文件，不执行 stop/restart。切换为静态审计页成功后禁用旧的 `aws-audit-web.service`，不再依赖 `9998`，也不发送访问密码。
-
-安装器会检查旧 cron 中的日报任务；发现可能重复执行时停止，让你先移除对应旧任务，不会自行删除其他 cron。新的服务名称：
-
-```text
-aws-user-audit.service    单次采集、生成、发布、Lark 总览
-aws-user-audit.timer      每天北京时间 08:01 触发，停机恢复补最近一份
-```
-
-计时器为 `Persistent=true`。安装/更新在启用前更新本任务的计时器时间戳，跳过安装当次的历史补触发，不主动执行报告；后续停机错过定时时间后，恢复会正常补跑。服务每次明确传递报表结束日期：北京时间 08:00 前选择昨天，08:00 起选择今天。因此凌晨恢复不会查询尚未结束的窗口。多天停机只补最近一份；手工补其他日期见下文。
-
-验证部署与查看日志：
-
-```bash
+sudo bash /usr/local/aws-user-audit/install.sh --update
 systemctl list-timers --all aws-user-audit.timer
-systemctl status aws-user-audit.timer --no-pager
+systemctl cat aws-user-audit.service
 journalctl -u aws-user-audit.service -n 100 --no-pager
-curl -sSI --max-time 5 -H 'Host: zybocedata-pass.v668live.com' http://127.0.0.1:8889/audit/
 ```
 
-尚未生成过报告时 `/audit/` 可能返回 403/404；安装不会用示例报告冒充真实报告。已有网页在更新时保留，到下次任务才替换。首次定时运行需要 AWS 实际权限、网络和有效 Lark Webhook；安装检查只验证本地格式，不能证明远端授权或机器人投递成功。
+`systemctl cat` 中 Python、工作目录和配置文件都应指向新目录。旧 `/usr/local/shenji` 的历史文件保留，不自动删除或搬迁；系统定时器改为新路径。自行维护的旧 cron 若仍存在，安装器会停止并提示，避免重复运行。
 
-需要手工执行一次时（会真实采集并推送 Lark）：
+安装器只在指定 Nginx 文件中唯一匹配域名和 `listen 8889` 的 server 内修改 `/audit` 和 `/audit/`，alias 更新为新目录的 `index/`。原前端及 `/audit_rds`、`/audit_rds/` 保持原文；未知路由或匹配不唯一时停止。先备份、`nginx -t`，通过后仅 reload；失败恢复，不 stop/restart。安装失败恢复原任务状态；pip 依赖安装不具备完整回滚。
+
+新路径不应与 RDS 项目共用。原有网页密码服务在静态页面切换成功后停用。报告使用同源外部 CSS/JS，适配原 `style-src 'self'` CSP。
+
+## 私有配置填写
+
+完整带注释模板为 `aws-audit-config.example.json`，预留 7 个账号，后续可继续追加。账号 1 先启用，其他配置好后设置 `ENABLED: true`。账号 ID 占位值必须替换为真实的 12 位账号 ID。
+
+```json
+{
+  "OUTPUT_DIRECTORY": "reports",
+  "PUBLISH_DIRECTORY": "index",
+  "STATE_DIRECTORY": ".state",
+  "TIMEZONE": "Asia/Shanghai",
+  "ACCOUNT_CONCURRENCY": 7,
+  "AUTO_MAIL_MAX_PER_DAY": 1,
+  "SMTP_HOST": "smtp.example.com",
+  "SMTP_PORT": 465,
+  "SMTP_SECURITY": "ssl",
+  "SMTP_USERNAME": "sender@example.com",
+  "SMTP_AUTH_CODE": "填写邮箱授权码",
+  "MAIL_RECIPIENTS": ["audit@example.com"],
+  "MAIL_CC": ["ops@example.com"],
+  "MAIL_SUBJECT": "AWS账号操作审计日报",
+  "LARK_ALERTS_ENABLED": false,
+  "LARK_WEBHOOK_URL": "",
+  "LARK_SIGNING_SECRET": "",
+  "ACCOUNTS": [
+    {
+      "NAME": "production",
+      "ACCOUNT_ID": "123456789012",
+      "ENABLED": true,
+      "AWS_PROFILE": "audit",
+      "AWS_ACCESS_KEY_ID": "",
+      "AWS_SECRET_ACCESS_KEY": "",
+      "AWS_SESSION_TOKEN": "",
+      "REGIONS": "all"
+    }
+  ]
+}
+```
+
+- `SMTP_USERNAME` 同时为发件邮箱与登录账号；465 使用 `ssl`，587 通常使用 `starttls`。只支持验证证书的 TLS。邮箱参数沿用 RDS 字段名称，可从自己的 RDS 私有配置中复制 SMTP/MAIL 字段；无需将真实配置发给我。
+- `MAIL_RECIPIENTS` 至少一个地址，`MAIL_CC` 可为空；会对 To/CC 去重。邮件正文先给出各账号增删改数量，再附完整 PDF。
+- 使用原 root profile `audit` 时保留 `AWS_PROFILE: "audit"`，Key 留空。使用单独 Key 时 `AWS_PROFILE` 留空，成对填写 ID/Secret；临时凭据还需 Token。均留空时使用默认凭据链/实例角色。每个启用账号先通过 STS 核对归属，错配账号不继续读取 CloudTrail。
+- `REGIONS: "all"` 扫描本账号已启用区域，标准 AWS 分区另纳入 `us-east-1` 以覆盖全局事件；也可填写区域数组。单个账号失败不阻止其他账号，失败账号 PDF 明确标记不完整，邮件标题也带不完整标记，不把失败当成零操作。
+- 开启异常群时填真实 `LARK_WEBHOOK_URL` 并设置 `LARK_ALERTS_ENABLED: true`，签名校验开启时同时填写 `LARK_SIGNING_SECRET`。原 `lark-config.json` 可供你复制地址和签名；新定时任务只读取统一 JSON，不发送正常 Lark 日报。单次发现失败即告警，同一轮报告的同类异常一小时内抑制重复；只在任务实际执行时检查，不另加分钟级重试定时器。
+- 相对目录均以配置文件所在目录计算。`PUBLISH_DIRECTORY` 须与安装器 Nginx alias 目录一致，默认 `index`；自定义时同时传 `install.sh --publish-dir`。
+- `PDF_FONT_PATH` 可选中文 TTF/TTC；Linux 可安装 `fonts-wqy-zenhei` 提高跨设备显示一致性。留空时自动寻找字体，否则使用中文 CID 字体。
+- 沿用 25 小时窗口和每日 08:01；不继承 RDS 的自然日窗口、分段 SQL 采集、IP 过滤或自动删除设置。历史报告不会自动删除。
+
+本地检查不访问 AWS、SMTP 或 Lark：
+
+```bash
+sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_audit_multi.py   --config /usr/local/aws-user-audit/aws-audit-config.json --check-config
+```
+
+安装的预检另检查本地 profile 是否存在，不请求 AWS 凭据，也不能证明远端权限或 SMTP 授权有效。
+
+## 执行与投递状态
+
+等待 08:01 自动运行，或明确手动执行一次服务（**会真实采集、发送邮件**，同日自动额度仍生效）：
 
 ```bash
 sudo systemctl start aws-user-audit.service
+sudo journalctl -u aws-user-audit.service -n 100 --no-pager
+ls -lh /usr/local/aws-user-audit/index/
 ```
 
-手工补指定报表日期（同一日期重跑会覆盖该归档和网页，并再次通知）：
+手动指定报表结束日；不加 `--send-mail` 仅采集并生成 PDF/HTML，默认也更新网页：
 
 ```bash
-sudo /usr/local/shenji/.venv/bin/python /usr/local/shenji/deploy/run_scheduled.py --date 2026-10-28
+sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_audit_multi.py   --config /usr/local/aws-user-audit/aws-audit-config.json --date 2026-11-04
 ```
 
-后面的 AWS 授权和命令行说明仍适用；旧手工密码认证部署已取消，不再作为本次部署步骤。
+明确手动发送（所有启用账号合并一封；此显式操作可额外超出自动邮件每日额度）：
 
+```bash
+sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_audit_multi.py   --config /usr/local/aws-user-audit/aws-audit-config.json --date 2026-11-04 --send-mail
+```
 
-脚本默认查询北京时间昨天07:00至今天08:00的25小时 CloudTrail 管理事件，生成中文HTML日报和JSON明细。报表日期使用窗口结束日，例如2026-10-28日报覆盖2026-10-27 07:00至2026-10-28 08:00。报告按新增、删除、修改、Secrets Manager查看、登录信息分类，普通查看忽略。
+同一份已接受或投递不确定的报告不会直接重复发；核实邮箱后确需重发时，手动命令再加 `--force-resend`。不要删除 `.state/mail-delivery.json` 来重置额度。自动邮件按**发送当天北京时间**最多一封，账号、收件人、数据或完整度改变不触发第二封。后续重跑仍更新本地报告与网页。`AUTO_MAIL_MAX_PER_DAY: 0` 关闭自动邮件，仍生成本地报告。
 
-固定北京时间（Asia/Shanghai，UTC+8），扫描当前账号同一AWS分区内所有已启用区域。每天北京时间08:01执行，相邻两份日报有意重叠07:00至08:00这一小时，单份报告内部仍按EventID去重。查询左闭右开；08:00整的事件由之后覆盖该时刻的窗口收录。08:00前执行当日报表会拒绝，不会缩短窗口。
+提交 SMTP 前先落盘 `sending`；进程中断、部分拒收、提交中断或损坏状态保守视为投递不确定，停止自动重发。明确认证/连接失败不消耗成功额度，等下次实际运行再试；此项目没有“15 分钟后自动重试”机制。SMTP 接受只代表服务器接受，不保证最终进入收件箱。
 
-这里提供了脚本、最小权限策略和离线演示。尚未连接你的实际 AWS 账号，真实数据采集需要先由你配置身份与授权。示例数据不代表真实账号活动。
+产物示例：
+
+```text
+/usr/local/aws-user-audit/
+  reports/123456789012/2026-11-04/
+    2026-11-04-aws操作审计.html
+    123456789012-2026-11-04-aws操作审计.pdf
+    report.json
+    audit-report.css
+    audit-report.js
+  index/
+    index.html
+    audit-report.css
+    audit-report.js
+    123456789012/index.html
+  .state/
+    mail-delivery.json
+```
+
+返回码：0 完成或按规则跳过邮件，1 启动/配置错误，2 查询不完整，3 通知失败或投递不确定，4 网页发布失败，5 报告/PDF 生成失败。网页失败仍可发送完整 PDF，邮件正文不会附指向旧网页的链接。
+
+后文保留单账号 CLI、IAM 和可选手动 Lark 功能，供兼容已有手工命令使用；新定时部署使用上面的多账号邮件入口。
+
 
 ## 报告能说明什么
 
@@ -218,7 +305,7 @@ aws --profile audit ec2 describe-regions --region eu-north-1 --query "Regions[].
 生成并推送总览：
 
 ```bash
-.venv/bin/python aws_daily_audit.py --profile audit --send-lark --publish-dir /usr/local/shenji/index
+.venv/bin/python aws_daily_audit.py --profile audit --send-lark --publish-dir /usr/local/aws-user-audit/index
 ```
 
 只生成文件，不发送Lark时省略`--send-lark`。EC2角色方式省略`--profile audit`。Windows将Python路径替换成`.\.venv\Scripts\python.exe`。
@@ -230,12 +317,12 @@ aws --profile audit ec2 describe-regions --region eu-north-1 --query "Regions[].
 ```text
 reports/<AWS账号ID>/2026-10-28/2026-10-28-aws操作审计.html
 reports/<AWS账号ID>/2026-10-28/report.json
-/usr/local/shenji/index/index.html
-/usr/local/shenji/index/audit-report.css
-/usr/local/shenji/index/audit-report.js
+/usr/local/aws-user-audit/index/index.html
+/usr/local/aws-user-audit/index/audit-report.css
+/usr/local/aws-user-audit/index/audit-report.js
 ```
 
-Linux实际AWS查询默认发布到`/usr/local/shenji/index/index.html`，日期HTML和JSON仍保留。CSS和搜索JavaScript是同目录独立文件，兼容现有 `default-src 'self'; style-src 'self'` 策略。代码会先复制全部静态文件，再原子替换index.html；不将JSON发布到网页目录。缺少任一引用文件时停止发布，保留旧index.html。
+Linux实际AWS查询默认发布到`/usr/local/aws-user-audit/index/index.html`，日期HTML和JSON仍保留。CSS和搜索JavaScript是同目录独立文件，兼容现有 `default-src 'self'; style-src 'self'` 策略。代码会先复制全部静态文件，再原子替换index.html；不将JSON发布到网页目录。缺少任一引用文件时停止发布，保留旧index.html。
 
 样式和脚本链接带内容版本参数，避免浏览器沿用旧缓存。查看下载的日期HTML时，需要同时保留同目录的 `audit-report.css` 和 `audit-report.js`。请勿只手动复制一个HTML文件；脚本的发布函数会自动复制三个文件。
 
@@ -293,7 +380,7 @@ chmod 600 lark-config.json
 | `--date` | 北京时间今天 | 25小时窗口结束日期 |
 | `--today` | 与默认相同 | 今天为窗口结束日期 |
 | `--output-dir` | reports | 日期归档根目录 |
-| `--publish-dir` | Linux实际查询为/usr/local/shenji/index | 复制HTML为index.html |
+| `--publish-dir` | Linux实际查询为/usr/local/aws-user-audit/index | 复制HTML为index.html |
 | `--no-publish` | 不启用 | 不更新网页副本 |
 | `--send-lark` | 不启用 | 生成及发布后才推送 |
 | `--lark-config` | lark-config.json | 可指定配置文件绝对路径 |

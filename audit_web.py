@@ -340,8 +340,8 @@ def create_server(publish_dir, state_dir, port=0):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--publish-dir", default="/usr/local/shenji/index")
-    parser.add_argument("--state-dir", default="/usr/local/shenji/auth")
+    parser.add_argument("--publish-dir", default="/usr/local/aws-user-audit/index")
+    parser.add_argument("--state-dir", default="/usr/local/aws-user-audit/auth")
     parser.add_argument("--port", type=int, default=9998)
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:

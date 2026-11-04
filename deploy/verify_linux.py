@@ -20,7 +20,7 @@ def main():
             folder.mkdir(parents=True, exist_ok=True)
         (runtime / ".venv/bin/python").symlink_to(sys.executable)
         shutil.copyfile(Path(__file__).parent / "run_scheduled.py", runtime / "deploy/run_scheduled.py")
-        for name, content in render_units(str(runtime), str(public), "audit", str(runtime / "lark-config.json")).items():
+        for name, content in render_units(str(runtime), str(public), str(runtime / "aws-audit-config.json")).items():
             (units / name).write_text(content, encoding="utf-8")
         subprocess.run(["systemd-analyze", "verify", str(units / "aws-user-audit.service"),
                         str(units / "aws-user-audit.timer")], check=True)

@@ -47,7 +47,7 @@ class InstallerShellTests(unittest.TestCase):
         if os.name == "nt":
             # Windows Python needs MSYS source/temp paths converted, while the
             # Linux paths embedded in units must keep their literal values.
-            environment["MSYS2_ARG_CONV_EXCL"] = "/usr/local/shenji;/etc/nginx"
+            environment["MSYS2_ARG_CONV_EXCL"] = "/usr/local/aws-user-audit;/etc/nginx"
         return environment
 
     def run_installer(self, *arguments, environment=None):
@@ -80,13 +80,26 @@ class InstallerShellTests(unittest.TestCase):
             self.assertEqual(nginx.read_bytes(), original)
             self.assertIn("Persistent=true", result.stdout)
             self.assertIn("08:01:00 Asia/Shanghai", result.stdout)
-            self.assertIn("/usr/local/shenji/deploy/run_scheduled.py", result.stdout)
+            self.assertIn("/usr/local/aws-user-audit/deploy/run_scheduled.py", result.stdout)
+            self.assertIn("/usr/local/aws-user-audit/aws-audit-config.json", result.stdout)
+            self.assertNotIn("--profile", result.stdout)
+            self.assertNotIn("--lark-config", result.stdout)
             self.assertNotIn("--auth-state-dir", result.stdout)
 
     def test_unknown_option_stops_before_system_actions(self):
         result = self.run_installer("--unexpected-option")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--help", result.stderr)
+
+    def test_rds_project_markers_stop_before_system_actions(self):
+        with tempfile.TemporaryDirectory(prefix="audit-rds-protection-") as directory:
+            temporary = Path(directory)
+            (temporary / "rds_multi.py").write_text("# fictional RDS marker\n", encoding="utf-8")
+            result = self.run_installer("--dry-run", "--install-dir", shell_path(temporary))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("RDS", result.stderr)
+            self.assertEqual((temporary / "rds_multi.py").read_text(encoding="utf-8"), "# fictional RDS marker\n")
+            self.assertFalse((temporary / ".venv").exists())
 
 
 if __name__ == "__main__":
