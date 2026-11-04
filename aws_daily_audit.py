@@ -490,6 +490,7 @@ def build_report(events, *, audit_date, timezone_name, start, end, account_id="u
     zone = ZoneInfo(timezone_name)
     period_label = (f"北京时间前一天{start.astimezone(zone):%H:%M}至报表日{end.astimezone(zone):%H:%M}（{hours:g}小时）"
                     if daily_window else "当日截至查询时刻" if in_progress else "完整自然日")
+    from audit_identity_summary import summarize_identities
     return {"metadata": {"audit_date": audit_date, "timezone": timezone_name, "account_id": account_id,
             "in_progress": in_progress, "window_mode": window_mode,
             "period_label": period_label, "window_hours": hours,
@@ -506,7 +507,7 @@ def build_report(events, *, audit_date, timezone_name, start, end, account_id="u
             "failed_or_partial": sum(row["failed"] for row in rows),
             "counts": {category: counts[category] for category in CATEGORIES},
             "count_note": "按独立 CloudTrail EventID 计数，不等于人工操作次数；批量 Secret 读取可能产生多个事件。"},
-            "events": rows}
+            "actors": summarize_identities(rows), "events": rows}
 
 
 def render_html(report):

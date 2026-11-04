@@ -146,7 +146,11 @@ class MultiAccountTests(unittest.TestCase):
             text = "\n".join(page.extract_text() for page in PdfReader(pdf).pages)
             self.assertIn(expected, text)
             self.assertEqual(len(PdfReader(pdf).pages), 1)
-            for detail in ("hhjgx", "ModifyInstanceAttribute", "t3.medium", "i-fictional", "203.0.113.4"):
+            self.assertIn("hhjgx", text)
+            self.assertIn("IAM", text)
+            self.assertEqual(structured["actors"][0]["actor"], "hhjgx")
+            self.assertEqual(structured["actors"][0]["counts"]["修改"], 1)
+            for detail in ("ModifyInstanceAttribute", "t3.medium", "i-fictional", "203.0.113.4"):
                 self.assertNotIn(detail, text)
                 self.assertIn(detail, html.read_text(encoding="utf-8"))
             self.assertTrue(html.is_file())
@@ -176,6 +180,49 @@ class MultiAccountTests(unittest.TestCase):
         self.assertEqual(value["events"], [])
         self.assertEqual([kind for kind, options in session.clients], ["sts"])
         session.ec2.describe_regions.assert_not_called()
+
+    def test_pdf_has_iam_user_rows_and_merges_role_sessions_without_operation_details(self):
+        config, _ = self.config()
+        factory, sessions = self.factory(config["ACCOUNTS"])
+        account_id = config["ACCOUNTS"][0]["ACCOUNT_ID"]
+        session = sessions[config["ACCOUNTS"][0]["AWS_ACCESS_KEY_ID"]]
+        trail = session.client("cloudtrail", region_name="eu-north-1")
+        rows = []
+        for name in ("beiou", "hhjgx"):
+            item = event(account_id)
+            item["eventID"] = "iam-" + name
+            item["userIdentity"]["userName"] = name
+            item["userIdentity"]["arn"] = f"arn:aws:iam::{account_id}:user/{name}"
+            rows.append(item)
+        for name in ("session-one", "session-two"):
+            item = event(account_id)
+            item["eventID"] = name
+            item["userIdentity"] = {"type": "AssumedRole", "principalId": "AROATEST:" + name,
+                                    "arn": f"arn:aws:sts::{account_id}:assumed-role/DeployRole/{name}",
+                                    "sessionContext": {"sessionIssuer": {"userName": "DeployRole",
+                                        "arn": f"arn:aws:iam::{account_id}:role/DeployRole"}}}
+            rows.append(item)
+
+        def lookup(**options):
+            if options["LookupAttributes"][0]["AttributeKey"] == "ReadOnly":
+                return {"Events": [{"EventId": item["eventID"], "CloudTrailEvent": json.dumps(item)} for item in rows]}
+            return {"Events": []}
+
+        trail.lookup_events = Mock(side_effect=lookup)
+        result = self.execute_report(config, factory)
+        self.assertEqual(result, 0, self.stderr.getvalue())
+        archive = Path(config["OUTPUT_DIRECTORY"]) / account_id / "2026-11-04"
+        structured = json.loads((archive / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual({row["actor"]: row["total"] for row in structured["actors"]},
+                         {"beiou": 1, "hhjgx": 1, "DeployRole": 2})
+        pdf = archive / f"{account_id}-2026-11-04-aws操作审计.pdf"
+        reader = PdfReader(pdf)
+        self.assertEqual(len(reader.pages), 1)
+        text = reader.pages[0].extract_text()
+        for name in ("beiou", "hhjgx", "DeployRole", "账号合计"):
+            self.assertIn(name, text)
+        for detail in ("ModifyInstanceAttribute", "i-fictional", "session-one", "session-two", "203.0.113.4", EVENT_SECRET):
+            self.assertNotIn(detail, text)
 
     def test_each_account_uses_its_own_explicit_credentials_or_profile(self):
         day, start, end, _ = resolve_window("2026-11-04", "Asia/Shanghai", now=NOW, daily=True)
