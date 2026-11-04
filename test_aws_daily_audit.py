@@ -281,6 +281,28 @@ class RedactionTests(unittest.TestCase):
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_q_chat_labels_survive_normalization_deduplication_and_identity_summary(self):
+        records = [sample_event(eventID="q-start", eventSource="q.amazonaws.com", eventName="StartConversation"),
+                   sample_event(eventID="q-send", eventSource="q.amazonaws.com", eventName="SendMessage"),
+                   sample_event(eventID="q-send-failed", eventSource="q.amazonaws.com", eventName="SendMessage",
+                                errorCode="AccessDenied")]
+        records.append(dict(records[1]))
+        day, start, end = audit.make_window("2026-10-27", "Asia/Shanghai")
+        report = audit.build_report(records, audit_date=day, timezone_name="Asia/Shanghai",
+                                    start=start, end=end, offline=True)
+        self.assertEqual(report["metadata"]["total"], 3)
+        self.assertEqual(report["metadata"]["duplicates_removed"], 1)
+        self.assertEqual(report["actors"][0]["total"], 3)
+        summary = {row["event_name"]: row for row in report["actor_events"]}
+        self.assertEqual((summary["StartConversation"]["event_label"], summary["StartConversation"]["total"]),
+                         ("AI 对话：发起会话", 1))
+        self.assertEqual((summary["SendMessage"]["event_label"], summary["SendMessage"]["total"],
+                          summary["SendMessage"]["failed"]), ("AI 对话：发送消息", 2, 1))
+        for row in report["events"]:
+            self.assertEqual(row["translation_status"], "reviewed")
+            self.assertNotIn("待补中文", row["event_label"])
+            self.assertEqual(row["description"].startswith("尝试："), row["failed"])
+
     def test_official_dashboard_label_stays_stable_across_success_and_failure(self):
         labels = []
         for failed in (False, True):

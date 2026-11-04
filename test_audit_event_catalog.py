@@ -39,6 +39,22 @@ class EventCatalogTests(unittest.TestCase):
             self.assertEqual(result["translation_status"], "untranslated")
             self.assertIn(source + " / " + name, result["event_label"])
 
+    def test_q_chat_labels_are_distinct_reviewed_and_service_specific(self):
+        expected = {"SendMessage": "AI 对话：发送消息", "StartConversation": "AI 对话：发起会话"}
+        with patch("socket.create_connection", side_effect=AssertionError("network forbidden")):
+            for name, label in expected.items():
+                result = catalog.translate_event(self.event("q.amazonaws.com", name))
+                self.assertEqual(result["event_label"], label)
+                self.assertEqual(result["translation_status"], "reviewed")
+                self.assertEqual(result["service_name"], "Amazon Q Developer")
+                self.assertEqual(result["operation_reference"], "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/security_iam_permissions.html")
+                self.assertEqual(result, catalog.translate_event(self.event("q.amazonaws.com.cn", name)))
+                self.assertNotEqual(catalog.translate_event(self.event("q.amazonaws.com.evil.test", name))["event_label"], label)
+            sqs = catalog.translate_event(self.event("sqs.amazonaws.com", "SendMessage"))
+            self.assertNotIn(sqs["event_label"], expected.values())
+            self.assertNotEqual(sqs["service_name"], "Amazon Q Developer")
+        self.assertEqual(len(set(expected.values())), 2)
+
     def test_malformed_catalog_does_not_break_reviewed_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.json"
@@ -130,6 +146,16 @@ class CatalogBuilderTests(unittest.TestCase):
                 self.builder.build(Path(directory))
             with self.assertRaisesRegex(ValueError, "拒绝覆盖"):
                 self.builder.build(Path(directory) / "missing")
+
+    def test_q_chat_labels_persist_when_regenerating_reviewed_entries(self):
+        entries = self.builder.reviewed_entries()["q.amazonaws.com"]
+        self.assertEqual(set(entries), {"SendMessage", "StartConversation"})
+        self.assertEqual(entries["SendMessage"]["event_label"], "AI 对话：发送消息")
+        self.assertEqual(entries["StartConversation"]["event_label"], "AI 对话：发起会话")
+        for record in entries.values():
+            self.assertEqual(record["translation_status"], "reviewed")
+            self.assertEqual(record["service_name"], "Amazon Q Developer")
+            self.assertNotIn("category", record)
 
 
 if __name__ == "__main__":
