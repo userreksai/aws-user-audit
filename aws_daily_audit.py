@@ -575,6 +575,17 @@ def write_report(report, output_dir, *, include_html=True):
         files = list(report_assets().items()) + files + [(f"{meta['audit_date']}-aws操作审计.html", render_html(report))]
     for name, content in files:
         target = folder / name
+        if name == "report.json":
+            descriptor, temporary = tempfile.mkstemp(prefix=".audit-report-", suffix=".tmp", dir=folder)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(content)
+                # mkstemp creates mode 0600, including under a manual shell's
+                # usual 022 umask. Never expose the private JSON as mode 0644.
+                os.replace(temporary, target)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            continue
         temp = folder / (name + ".tmp")
         temp.write_text(content, encoding="utf-8")
         temp.replace(target)
