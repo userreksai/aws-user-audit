@@ -164,6 +164,11 @@ def reviewed_entries():
     add("monitoring", "PutMetricAlarm", "创建或更新 CloudWatch 指标告警配置",
         "https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutMetricAlarm.html")
     add("signin", "ConsoleLogin", "登录 AWS 控制台", NON_API_REFERENCE, "AWS 控制台登录")
+    # Q Developer chat events are documented CloudTrail actions even though
+    # these console APIs are absent from the public SDK operation model.
+    q_reference = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/security_iam_permissions.html"
+    add("q", "SendMessage", "AI 对话：发送消息", q_reference, "Amazon Q Developer")
+    add("q", "StartConversation", "AI 对话：发起会话", q_reference, "Amazon Q Developer")
     return entries
 
 

@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-11-04T12:39:43+00:00",
+  "generated_at": "2026-11-04T13:25:06+00:00",
   "source_policy": "Reviewed API meanings plus Chinese AWS Service Authorization labels intersected with installed public SDK operations. Permission access levels do not define CRUD. Endpoint-based source coverage is not a complete CloudTrail event inventory.",
   "sdk_version": "1.43.120",
   "statistics": {
-    "service_sources": 331,
-    "event_labels": 15303,
+    "service_sources": 332,
+    "event_labels": 15305,
     "official_zh": 15188,
-    "reviewed": 115,
+    "reviewed": 117,
     "cached_pages": 477,
     "page_results": {
       "matched": 335,
@@ -92832,6 +92832,20 @@
         "service_name": "AWS Proton",
         "sdk_service": "proton",
         "sdk_operation": "UpdateTemplateSyncConfig"
+      }
+    },
+    "q.amazonaws.com": {
+      "SendMessage": {
+        "event_label": "AI 对话：发送消息",
+        "translation_status": "reviewed",
+        "operation_reference": "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/security_iam_permissions.html",
+        "service_name": "Amazon Q Developer"
+      },
+      "StartConversation": {
+        "event_label": "AI 对话：发起会话",
+        "translation_status": "reviewed",
+        "operation_reference": "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/security_iam_permissions.html",
+        "service_name": "Amazon Q Developer"
       }
     },
     "qbusiness.amazonaws.com": {
