@@ -284,8 +284,6 @@ def render_report_pdf(report: dict, path: Path, font_path: str | None = None) ->
         story.append(p("本报告没有可汇总的用户事件。", "sub"))
     story.extend([Spacer(1, 4 * mm),
                   p(f"报告事件 {summary['total']:,} 条；其中失败或含失败响应 {summary['failed']:,} 条。"),
-                  p("Secret 查看指 Secrets Manager 查看；失败数是分类次数的子集。", "sub"),
-                  p("同一角色的会话按角色合并统计，角色身份不直接认定为自然人。", "sub"),
                   p("查询状态：所列查询完成。" if summary["complete"]
                     else "查询或事件解析不完整，请检查任务日志后补跑。", "sub")])
     if summary["total"] == 0:
