@@ -22,14 +22,29 @@ INSTALL = "/usr/local/aws-user-audit"
 
 
 class SystemdUnitRenderTests(unittest.TestCase):
-    def test_default_timer_runs_at_0801_beijing_and_catches_up(self):
+    def test_default_timer_runs_at_1005_beijing_and_catches_up(self):
         units = install_support.render_units()
         self.assertEqual(set(units), {"aws-user-audit.service", "aws-user-audit.timer"})
         timer = units["aws-user-audit.timer"]
-        self.assertRegex(timer, r"(?m)^OnCalendar=.*08:01(?::00)?\s+Asia/Shanghai\s*$")
+        self.assertRegex(timer, r"(?m)^OnCalendar=.*10:05(?::00)?\s+Asia/Shanghai\s*$")
         self.assertRegex(timer, r"(?m)^Persistent=true\s*$")
         self.assertIn("aws-user-audit.service", timer)
         self.assertNotIn("UTC+8", timer)
+
+    def test_checked_in_units_match_generated_default_units(self):
+        for name, content in install_support.render_units().items():
+            self.assertEqual((Path(__file__).parent / "deploy" / name).read_text(encoding="utf-8"), content)
+
+    def test_custom_daily_mail_time_is_the_real_systemd_calendar(self):
+        timer = install_support.render_units(daily_mail_time="09:10")["aws-user-audit.timer"]
+        self.assertIn("OnCalendar=*-*-* 09:10:00 Asia/Shanghai", timer)
+        self.assertIn("at 09:10 Beijing time", timer)
+        self.assertNotIn("10:05", timer)
+
+    def test_daily_mail_time_rejects_invalid_values_and_unit_injection(self):
+        for value in ("9:10", "24:00", "09:60", "09:10\nOnBootSec=1s", True, None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                install_support.render_units(daily_mail_time=value)
 
     def test_service_uses_private_config_and_has_no_legacy_lark_or_password_options(self):
         service = install_support.render_units()["aws-user-audit.service"]
@@ -143,6 +158,13 @@ class LocalPreflightTests(unittest.TestCase):
         with patch.object(audit_config, "load_config", return_value=self.config), self.assertRaisesRegex(ValueError, "PUBLISH_DIRECTORY"):
             install_support.local_preflight(INSTALL, self.path, "/srv/other/index")
 
+    def test_schedule_changed_after_render_stops_before_credentials(self):
+        self.config.update(DAILY_MAIL_TIME="11:05", REPORT_START_TIME="10:00", REPORT_END_TIME="10:00")
+        with patch.object(audit_config, "load_config", return_value=self.config), \
+             self.assertRaisesRegex(ValueError, "时间配置已变化"):
+            install_support.local_preflight(INSTALL, self.path, INSTALL + "/index",
+                                             expected_schedule=("10:05", "10:00", "10:00"))
+
     def test_missing_configuration_fails_before_loading_anything(self):
         with patch.object(audit_config, "load_config") as load, self.assertRaises(ValueError):
             install_support.local_preflight(INSTALL, self.root / "missing.json")
@@ -164,27 +186,40 @@ class LocalPreflightTests(unittest.TestCase):
 
 
 class ScheduledReportDateTests(unittest.TestCase):
-    def test_beijing_boundary_before_eight_and_at_eight(self):
-        for moment, expected in ((datetime(2026, 10, 27, 23, 59, 59, tzinfo=timezone.utc), "2026-10-27"),
-                                 (datetime(2026, 10, 28, 0, 0, tzinfo=timezone.utc), "2026-10-28"),
-                                 (datetime(2026, 10, 28, 0, 1, tzinfo=timezone.utc), "2026-10-28")):
+    def test_beijing_boundary_before_ten_and_at_ten(self):
+        for moment, expected in ((datetime(2026, 10, 28, 1, 59, 59, tzinfo=timezone.utc), "2026-10-27"),
+                                 (datetime(2026, 10, 28, 2, 0, tzinfo=timezone.utc), "2026-10-28"),
+                                 (datetime(2026, 10, 28, 2, 5, tzinfo=timezone.utc), "2026-10-28")):
             with self.subTest(moment=moment):
                 self.assertEqual(run_scheduled.report_date(moment), expected)
 
     def test_catchup_uses_latest_finished_beijing_window_instead_of_host_day(self):
         self.assertEqual(run_scheduled.report_date(datetime(2026, 10, 27, 18, tzinfo=timezone.utc)), "2026-10-27")
-        self.assertEqual(run_scheduled.report_date(datetime(2026, 10, 27, 20, tzinfo=ZoneInfo("America/New_York"))), "2026-10-28")
+        self.assertEqual(run_scheduled.report_date(datetime(2026, 10, 27, 22, tzinfo=ZoneInfo("America/New_York"))), "2026-10-28")
         self.assertEqual(run_scheduled.report_date(datetime(2027, 1, 1, 7, 59, tzinfo=ZoneInfo("Asia/Shanghai"))), "2026-12-31")
 
     def test_naive_clock_is_rejected(self):
         with self.assertRaises(ValueError):
             run_scheduled.report_date(datetime(2026, 10, 28, 8, 1))
 
+    def test_custom_end_boundary_and_legacy_eight_are_configurable(self):
+        before = datetime(2026, 11, 4, 1, 9, 59, tzinfo=timezone.utc)
+        at = datetime(2026, 11, 4, 1, 10, tzinfo=timezone.utc)
+        self.assertEqual(run_scheduled.report_date(before, "09:10"), "2026-11-03")
+        self.assertEqual(run_scheduled.report_date(at, "09:10"), "2026-11-04")
+        self.assertEqual(run_scheduled.report_date(datetime(2026, 11, 4, 0, 0, tzinfo=timezone.utc), "08:00"), "2026-11-04")
+
 
 class ScheduledCommandTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(run_scheduled, "load_config", return_value={
+            "DAILY_MAIL_TIME": "10:05", "REPORT_START_TIME": "10:00", "REPORT_END_TIME": "10:00"})
+        self.load = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_multi_entry_point_with_pdf_mail_and_no_normal_lark(self):
         command = run_scheduled.build_command(INSTALL, INSTALL + "/aws-audit-config.json",
-                                             now=datetime(2026, 10, 28, 0, 1, tzinfo=timezone.utc))
+                                             now=datetime(2026, 10, 28, 2, 5, tzinfo=timezone.utc))
         self.assertEqual(command, [INSTALL + "/.venv/bin/python", INSTALL + "/aws_audit_multi.py", "--config",
                                  INSTALL + "/aws-audit-config.json", "--date", "2026-10-28", "--send-mail", "--automatic-mail"])
         self.assertNotIn("--send-lark", command)
@@ -219,6 +254,52 @@ class ScheduledCommandTests(unittest.TestCase):
         with patch.object(run_scheduled.subprocess, "run") as process, redirect_stderr(io.StringIO()):
             self.assertEqual(run_scheduled.main(["--date", "2026-02-30"]), 1)
         process.assert_not_called()
+
+    def test_runner_loads_local_config_and_uses_configured_end_for_catchup(self):
+        self.load.return_value = {"REPORT_START_TIME": "08:00", "REPORT_END_TIME": "09:00", "DAILY_MAIL_TIME": "09:10"}
+        with patch.object(run_scheduled, "build_command", wraps=run_scheduled.build_command) as command, \
+             patch.object(run_scheduled.subprocess, "run", return_value=Mock(returncode=0)), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(run_scheduled.main(["--date", "2026-11-04"]), 0)
+        self.load.assert_called_once_with(INSTALL + "/aws-audit-config.json", require_mail=False)
+        self.assertEqual(command.call_args.kwargs["end_time"], "09:00")
+        self.assertIn("前一天08:00至该日09:00", output.getvalue())
+
+
+class ConfiguredScheduleTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="audit-schedule-plan-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = self.root / "config.json"
+
+    def test_missing_first_install_configuration_uses_new_defaults(self):
+        self.assertEqual(install_support.configured_schedule(self.path), {
+            "daily_mail_time": "10:05", "report_start_time": "10:00", "report_end_time": "10:00"})
+
+    def test_real_existing_jsonc_reads_times_without_querying_credentials_or_services(self):
+        self.path.write_text('// fictional config\n' + json.dumps({
+            "DAILY_MAIL_TIME": "09:10", "REPORT_START_TIME": "08:00", "REPORT_END_TIME": "09:00",
+            "ACCOUNTS": [{"NAME": "test", "ACCOUNT_ID": "123456789012", "AWS_PROFILE": "audit"}],
+            "AUTO_MAIL_MAX_PER_DAY": 0}), encoding="utf-8")
+        with patch("boto3.Session") as session:
+            self.assertEqual(install_support.configured_schedule(self.path), {
+                "daily_mail_time": "09:10", "report_start_time": "08:00", "report_end_time": "09:00"})
+        session.assert_not_called()
+
+    def test_render_cli_records_schedule_and_outputs_only_validated_times(self):
+        output = self.root / "generated"
+        schedule = {"daily_mail_time": "09:10", "report_start_time": "08:00", "report_end_time": "09:00"}
+        with patch.object(install_support, "configured_schedule", return_value=schedule), redirect_stdout(io.StringIO()):
+            result = install_support.main(["render", "--install-dir", INSTALL, "--publish-dir", INSTALL + "/index",
+                                            "--config", INSTALL + "/aws-audit-config.json", "--output-dir", str(output)])
+        self.assertEqual(result, 0)
+        plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["time"], "09:10:00")
+        self.assertEqual(plan["report_end_time"], "09:00")
+        self.assertEqual((output / "schedule.env").read_text(encoding="utf-8"),
+                         "DAILY_MAIL_TIME=09:10\nREPORT_START_TIME=08:00\nREPORT_END_TIME=09:00\n")
+        self.assertIn("OnCalendar=*-*-* 09:10:00 Asia/Shanghai", (output / "aws-user-audit.timer").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

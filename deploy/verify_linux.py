@@ -20,11 +20,15 @@ def main():
             folder.mkdir(parents=True, exist_ok=True)
         (runtime / ".venv/bin/python").symlink_to(sys.executable)
         shutil.copyfile(Path(__file__).parent / "run_scheduled.py", runtime / "deploy/run_scheduled.py")
-        for name, content in render_units(str(runtime), str(public), str(runtime / "aws-audit-config.json")).items():
-            (units / name).write_text(content, encoding="utf-8")
-        subprocess.run(["systemd-analyze", "verify", str(units / "aws-user-audit.service"),
-                        str(units / "aws-user-audit.timer")], check=True)
-        subprocess.run(["systemd-analyze", "calendar", "*-*-* 08:01:00 Asia/Shanghai"], check=True)
+        for clock in ("10:05", "09:10"):
+            rendered = render_units(str(runtime), str(public), str(runtime / "aws-audit-config.json"), daily_mail_time=clock)
+            for name, content in rendered.items():
+                (units / name).write_text(content, encoding="utf-8")
+            subprocess.run(["systemd-analyze", "verify", str(units / "aws-user-audit.service"),
+                            str(units / "aws-user-audit.timer")], check=True)
+            calendar = next(line.removeprefix("OnCalendar=") for line in rendered["aws-user-audit.timer"].splitlines()
+                            if line.startswith("OnCalendar="))
+            subprocess.run(["systemd-analyze", "calendar", calendar], check=True)
         frontend = """location / {
         proxy_pass http://127.0.0.1:8890;
         proxy_http_version 1.1;

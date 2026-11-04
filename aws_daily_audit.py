@@ -99,8 +99,9 @@ def make_window(date_text, timezone_name, now=None):
     return target.isoformat(), start, end
 
 
-def resolve_window(date_text, timezone_name, *, today=False, now=None, daily=False):
-    """daily=True 为固定北京时间07:00→次日08:00；其余为自然日辅助模式。"""
+def resolve_window(date_text, timezone_name, *, today=False, now=None, daily=False,
+                   daily_start="07:00", daily_end="08:00"):
+    """daily=True uses the prior/report day's Beijing clocks; legacy defaults remain."""
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
         raise ValueError("now 必须带时区")
@@ -114,10 +115,11 @@ def resolve_window(date_text, timezone_name, *, today=False, now=None, daily=Fal
         target = date.fromisoformat(date_text) if date_text else now.astimezone(zone).date()
         if date_text and target.isoformat() != date_text:
             raise ValueError("日期必须为 YYYY-MM-DD")
-        start = datetime.combine(target - timedelta(days=1), day_time(hour=7), zone).astimezone(UTC)
-        end = datetime.combine(target, day_time(hour=8), zone).astimezone(UTC)
+        from audit_schedule import parse_clock
+        start = datetime.combine(target - timedelta(days=1), parse_clock(daily_start, "REPORT_START_TIME"), zone).astimezone(UTC)
+        end = datetime.combine(target, parse_clock(daily_end, "REPORT_END_TIME"), zone).astimezone(UTC)
         if end > now:
-            raise ValueError("该日报窗口尚未结束；请在报表日期的北京时间 08:00 之后执行，或用 --date 指定已结束的报表日期。")
+            raise ValueError(f"该日报窗口尚未结束；请在报表日期的北京时间 {daily_end} 之后执行，或用 --date 指定已结束的报表日期。")
         return target.isoformat(), start, end, False
     current_date = now.astimezone(ZoneInfo(timezone_name)).date().isoformat()
     day, start, end = make_window(current_date if today else date_text, timezone_name, now=now)
@@ -461,10 +463,15 @@ def build_report(events, *, audit_date, timezone_name, start, end, account_id="u
     if "us-east-1" not in (regions or []) and not any(r.startswith(("cn-", "us-gov-")) for r in (regions or [])):
         warnings.append("未覆盖 us-east-1，可能遗漏 IAM 等全局服务事件；固定区域报告不能视为全账号审计。")
     counts = Counter(row["category"] for row in rows)
+    daily_window = window_mode in {"daily_25h", "configured_daily"}
+    hours = (end - start).total_seconds() / 3600
+    zone = ZoneInfo(timezone_name)
+    period_label = (f"北京时间前一天{start.astimezone(zone):%H:%M}至报表日{end.astimezone(zone):%H:%M}（{hours:g}小时）"
+                    if daily_window else "当日截至查询时刻" if in_progress else "完整自然日")
     return {"metadata": {"audit_date": audit_date, "timezone": timezone_name, "account_id": account_id,
             "in_progress": in_progress, "window_mode": window_mode,
-            "period_label": "北京时间前一天07:00至报表日08:00（25小时）" if window_mode == "daily_25h" else "当日截至查询时刻" if in_progress else "完整自然日",
-            "overlap_hours": 1 if window_mode == "daily_25h" else 0,
+            "period_label": period_label, "window_hours": hours,
+            "overlap_hours": max(0, hours - 24) if daily_window else 0,
             "window_start_local": start.astimezone(ZoneInfo(timezone_name)).isoformat(sep=" ", timespec="seconds"),
             "window_end_local_exclusive": end.astimezone(ZoneInfo(timezone_name)).isoformat(sep=" ", timespec="seconds"),
             "window_start_utc": start.isoformat(), "window_end_utc_exclusive": end.isoformat(),

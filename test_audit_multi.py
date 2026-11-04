@@ -94,6 +94,7 @@ class MultiAccountTests(unittest.TestCase):
     def config(self, accounts=None, **overrides):
         value = {"ACCOUNTS": accounts or [account()], "OUTPUT_DIRECTORY": "reports", "PUBLISH_DIRECTORY": "index",
                  "STATE_DIRECTORY": ".state", "ACCOUNT_CONCURRENCY": 7, "TIMEZONE": "Asia/Shanghai",
+                 "DAILY_MAIL_TIME": "08:01", "REPORT_START_TIME": "07:00", "REPORT_END_TIME": "08:00",
                  "SMTP_HOST": "smtp.example.invalid", "SMTP_PORT": 465, "SMTP_USERNAME": "sender@example.invalid",
                  "SMTP_AUTH_CODE": "TEST_SMTP_SECRET", "MAIL_RECIPIENTS": ["recipient@example.invalid"],
                  "MAIL_CC": ["copy@example.invalid"], "MAIL_SUBJECT": "AWS操作审计日报",
@@ -243,6 +244,61 @@ class MultiAccountTests(unittest.TestCase):
         smtp.assert_not_called()
         lark.assert_not_called()
         self.assertTrue(list(Path(config["OUTPUT_DIRECTORY"]).glob("*/*/*.pdf")))
+
+    def test_requested_1005_schedule_collects_exact_24_hours_and_formats_real_bounds(self):
+        config, _ = self.config(DAILY_MAIL_TIME="10:05", REPORT_START_TIME="10:00", REPORT_END_TIME="10:00")
+        selected = config["ACCOUNTS"][0]
+        session = FakeSession(selected["ACCOUNT_ID"])
+        cloudtrail = FakeCloudTrail(selected["ACCOUNT_ID"], "eu-north-1")
+        start = datetime(2026, 11, 3, 2, tzinfo=timezone.utc)
+        end = datetime(2026, 11, 4, 2, tzinfo=timezone.utc)
+        records = []
+        for key, stamp in (("before-start", start - timedelta(seconds=1)), ("at-start", start),
+                           ("before-end", end - timedelta(seconds=1)), ("at-end", end)):
+            record = event(selected["ACCOUNT_ID"])
+            record.update(eventID=key, eventTime=stamp.isoformat())
+            records.append(record)
+
+        def lookup(**kwargs):
+            cloudtrail.calls.append(kwargs)
+            values = records if kwargs["LookupAttributes"][0]["AttributeKey"] == "ReadOnly" else []
+            return {"Events": [{"EventId": item["eventID"], "CloudTrailEvent": json.dumps(item)} for item in values]}
+
+        cloudtrail.lookup_events = lookup
+        session.cloudtrails["eu-north-1"] = cloudtrail
+        with patch("boto3.Session", return_value=session), \
+             patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp, \
+             patch("lark_notify._send_payload") as lark, \
+             redirect_stdout(self.stdout), redirect_stderr(self.stderr):
+            result = multi.run_report(config, "2026-11-04", now=datetime(2026, 11, 4, 2, 5, tzinfo=timezone.utc),
+                                      send_mail=True, automatic_mail=True)
+        self.assertEqual(result, 0, self.stderr.getvalue())
+        archive = Path(config["OUTPUT_DIRECTORY"]) / selected["ACCOUNT_ID"] / "2026-11-04"
+        report = json.loads((archive / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([row["event_id"] for row in report["events"]], ["at-start", "before-end"])
+        self.assertEqual(report["metadata"]["counts"]["修改"], 2)
+        self.assertEqual(report["metadata"]["overlap_hours"], 0)
+        self.assertIn("24小时", report["metadata"]["period_label"])
+        self.assertNotIn("25小时", report["metadata"]["period_label"])
+        pdf = archive / f"{selected['ACCOUNT_ID']}-2026-11-04-aws操作审计.pdf"
+        pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+        for text in (pdf_text, smtp.call_args.args[2]):
+            self.assertIn("2026-11-03 10:00:00", text)
+            self.assertIn("2026-11-04 10:00:00", text)
+            self.assertNotIn("25小时", text)
+        for call in cloudtrail.calls:
+            self.assertEqual(call["StartTime"], start)
+            self.assertEqual(call["EndTime"], end)
+            self.assertEqual(call["EndTime"] - call["StartTime"], timedelta(hours=24))
+        smtp.assert_called_once()
+        lark.assert_not_called()
+
+    def test_custom_1000_window_not_finished_at_0959_never_resolves_credentials(self):
+        config, _ = self.config(DAILY_MAIL_TIME="10:05", REPORT_START_TIME="10:00", REPORT_END_TIME="10:00")
+        with patch("boto3.Session") as factory:
+            with self.assertRaises(ValueError):
+                multi.run_report(config, "2026-11-04", now=datetime(2026, 11, 4, 1, 59, tzinfo=timezone.utc))
+        factory.assert_not_called()
 
     def test_web_failure_does_not_prevent_mail_and_omits_stale_web_link(self):
         config, _ = self.config()

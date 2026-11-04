@@ -27,6 +27,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["STATE_DIRECTORY"], str(self.root / ".state"))
         self.assertEqual(config["ACCOUNTS"][0]["AWS_PROFILE"], "audit")
         self.assertEqual(config["TIMEZONE"], "Asia/Shanghai")
+        self.assertEqual(config["DAILY_MAIL_TIME"], "10:05")
+        self.assertEqual(config["REPORT_START_TIME"], "10:00")
+        self.assertEqual(config["REPORT_END_TIME"], "10:00")
+
+    def test_time_fields_are_configurable_and_invalid_values_never_echo(self):
+        config = self.load({**self.raw, "DAILY_MAIL_TIME": "11:20", "REPORT_START_TIME": "09:15", "REPORT_END_TIME": "10:30"})
+        self.assertEqual(config["DAILY_MAIL_TIME"], "11:20")
+        for key in ("DAILY_MAIL_TIME", "REPORT_START_TIME", "REPORT_END_TIME"):
+            for value in ("FAKE_SECRET_INVALID", "24:00", "8:01", "10:60", True):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError) as caught:
+                    self.load({**self.raw, key: value})
+                self.assertNotIn("FAKE_SECRET_INVALID", str(caught.exception))
+
+    def test_daily_mail_cannot_start_before_report_window_has_ended(self):
+        with self.assertRaisesRegex(ValueError, "DAILY_MAIL_TIME"):
+            self.load({**self.raw, "DAILY_MAIL_TIME": "09:59", "REPORT_END_TIME": "10:00"})
+        config = self.load({**self.raw, "DAILY_MAIL_TIME": "00:05", "REPORT_START_TIME": "00:00", "REPORT_END_TIME": "00:00"})
+        self.assertEqual(config["REPORT_END_TIME"], "00:00")
 
     def test_template_is_jsonc_with_seven_unique_accounts_and_no_secrets(self):
         config = load_config(Path(__file__).parent / "aws-audit-config.example.json")

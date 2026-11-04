@@ -59,7 +59,13 @@ def load_config(path, *, require_mail=False):
     result["TIMEZONE"] = _text(raw.get("TIMEZONE", "Asia/Shanghai"), "TIMEZONE")
     if result["TIMEZONE"] != "Asia/Shanghai":
         raise ValueError("TIMEZONE 固定为 Asia/Shanghai（北京时间）")
-    # The established 25-hour window and 08:01 timer are intentionally unchanged.
+    from audit_schedule import DEFAULT_MAIL_TIME, DEFAULT_START_TIME, DEFAULT_END_TIME, parse_clock
+    for key, default in (("DAILY_MAIL_TIME", DEFAULT_MAIL_TIME), ("REPORT_START_TIME", DEFAULT_START_TIME),
+                         ("REPORT_END_TIME", DEFAULT_END_TIME)):
+        result[key] = _text(raw.get(key, default), key, required=True)
+        parse_clock(result[key], key)
+    if result["DAILY_MAIL_TIME"] < result["REPORT_END_TIME"]:
+        raise ValueError("DAILY_MAIL_TIME 不能早于 REPORT_END_TIME，请在统计窗口结束后启动日报")
     result["ACCOUNT_CONCURRENCY"] = raw.get("ACCOUNT_CONCURRENCY", 7)
     if type(result["ACCOUNT_CONCURRENCY"]) is not int or not 1 <= result["ACCOUNT_CONCURRENCY"] <= 32:
         raise ValueError("ACCOUNT_CONCURRENCY 必须为 1-32 的整数")

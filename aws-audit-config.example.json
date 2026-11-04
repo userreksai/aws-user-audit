@@ -1,5 +1,5 @@
 // 私有配置：复制为 aws-audit-config.json，填写后 chmod 600；不要提交到 Git。
-// 支持 JSONC 注释；账号和邮件字段与 RDS 项目同名。此项目保留 25 小时窗口和 08:01 定时。
+// 支持 JSONC 注释；账号和邮件字段与 RDS 项目同名。发信和统计时间均可配置；默认北京时间 10:05，统计昨日 10:00 到今日 10:00。
 {
   // 相对路径以本配置所在目录为起点。安装默认目录为 /usr/local/aws-user-audit。
   "OUTPUT_DIRECTORY": "reports",
@@ -7,6 +7,11 @@
   "STATE_DIRECTORY": ".state",
   "REPORT_URL": "https://zybocedata-pass.v668live.com/audit/",
   "TIMEZONE": "Asia/Shanghai",
+  // 每日启动采集、生成和发信的北京时间；邮件在采集/PDF完成后提交。修改后重跑install.sh更新定时器。
+  "DAILY_MAIL_TIME": "10:05",
+  // 统计从报表结束日的前一天此时刻开始，到报表结束日下方时刻为止（结束时刻不含）。
+  "REPORT_START_TIME": "10:00",
+  "REPORT_END_TIME": "10:00",
   // 并发账号数 1-32；各账号内部按区域分页、限速读取 CloudTrail。
   "ACCOUNT_CONCURRENCY": 7,
   // 自动邮件每天最多一封；0 只更新本地报告，1 开启自动邮件。

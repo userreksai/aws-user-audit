@@ -18,9 +18,9 @@
 | Nginx 配置 | `/etc/nginx/conf.d/zybocedata-pass.v668live.com.conf` |
 | 网站入口 | `8889`、`/audit/`，详情链接 https://zybocedata-pass.v668live.com/audit/ |
 | 原前端 / RDS 路由 | `/` → `127.0.0.1:8890` 和 `/audit_rds/` 原文保留 |
-| 每日执行 | **北京时间 08:01**，不依赖服务器系统时区 |
-| 查询窗口 | **昨日 07:00 ≤ 事件时间 < 今日 08:00**，25 小时，相邻日报重叠 1 小时 |
-| 停机恢复 | 只补最近一份已结束的日报；08:00 前恢复选择前一结束日 |
+| 每日执行 | **北京时间 10:05**（`DAILY_MAIL_TIME`），不依赖服务器系统时区 |
+| 查询窗口 | **昨日 10:00 ≤ 事件时间 < 今日 10:00**，24 小时，相邻日报不重叠 |
+| 停机恢复 | 只补最近一份已结束的日报；配置的统计结束时刻之前恢复，选择前一结束日 |
 
 网页密码已取消。**安装/更新只配置服务与定时器，不查询 AWS，不发送邮件或 Lark。** 没有成功执行过报告时网页目录为空是正常现象。
 
@@ -76,6 +76,9 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
   "PUBLISH_DIRECTORY": "index",
   "STATE_DIRECTORY": ".state",
   "TIMEZONE": "Asia/Shanghai",
+  "DAILY_MAIL_TIME": "10:05",
+  "REPORT_START_TIME": "10:00",
+  "REPORT_END_TIME": "10:00",
   "ACCOUNT_CONCURRENCY": 7,
   "AUTO_MAIL_MAX_PER_DAY": 1,
   "SMTP_HOST": "smtp.example.com",
@@ -111,7 +114,11 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 - 开启异常群时填真实 `LARK_WEBHOOK_URL` 并设置 `LARK_ALERTS_ENABLED: true`，签名校验开启时同时填写 `LARK_SIGNING_SECRET`。原 `lark-config.json` 可供你复制地址和签名；新定时任务只读取统一 JSON，不发送正常 Lark 日报。单次发现失败即告警，同一轮报告的同类异常一小时内抑制重复；只在任务实际执行时检查，不另加分钟级重试定时器。
 - 相对目录均以配置文件所在目录计算。`PUBLISH_DIRECTORY` 须与安装器 Nginx alias 目录一致，默认 `index`；自定义时同时传 `install.sh --publish-dir`。
 - `PDF_FONT_PATH` 可选中文 TTF/TTC；Linux 可安装 `fonts-wqy-zenhei` 提高跨设备显示一致性。留空时自动寻找字体，否则使用中文 CID 字体。
-- 沿用 25 小时窗口和每日 08:01；不继承 RDS 的自然日窗口、分段 SQL 采集、IP 过滤或自动删除设置。历史报告不会自动删除。
+- `DAILY_MAIL_TIME` 控制每天启动采集和生成报告的北京时间，默认 `10:05`；邮件在采集和 PDF 完成后发送，不保证 10:05 整到达邮箱。
+- `REPORT_START_TIME` 是统计开始时刻（报表结束日的前一天），`REPORT_END_TIME` 是统计结束时刻（报表结束日），默认均为 `10:00`，即 24 小时。开始和结束都包含日期，采用左闭右开，报表日期是结束日。`DAILY_MAIL_TIME` 不能早于 `REPORT_END_TIME`。
+- 三项必须采用 `HH:MM` 格式。更改后重跑 `sudo bash /usr/local/aws-user-audit/install.sh`，安装器会依据 JSON 更新实际 systemd `OnCalendar` 并重新启用定时器；无需修改源码或手工编辑 unit。安装仍不会立即查询或发送。只修改 JSON 不会让 systemd 重新读取定时器。
+- 也可配置旧版 `08:01` / `07:00` / `08:00` 以恢复 25 小时及 1 小时重叠。新版本缺少这些字段时使用已确认的新默认 `10:05` / `10:00` / `10:00`，因此旧统一配置升级重装后也会切换新默认；明确填写的值始终优先。
+- 统计窗口不足 24 小时会在相邻日报之间留下空档，超过 24 小时会重叠；按自己要求设置。此项目不继承 RDS 的分段 SQL 采集、IP 过滤或自动删除设置，历史报告不会自动删除。
 
 本地检查不访问 AWS、SMTP 或 Lark：
 
@@ -121,9 +128,29 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
 
 安装的预检另检查本地 profile 是否存在，不请求 AWS 凭据，也不能证明远端权限或 SMTP 授权有效。
 
+## 修改日报时间
+
+在 `/usr/local/aws-user-audit/aws-audit-config.json` 中加入或修改这三项：
+
+```json
+"DAILY_MAIL_TIME": "10:05",
+"REPORT_START_TIME": "10:00",
+"REPORT_END_TIME": "10:00"
+```
+
+上述设置表示：北京时间每天 10:05 启动任务，统计昨日 10:00 至今日 10:00。例如 11 月 4 日日报统计 11 月 3 日 10:00（包含）至 11 月 4 日 10:00（不含）。
+
+```bash
+sudo bash /usr/local/aws-user-audit/install.sh
+systemctl cat aws-user-audit.timer
+systemctl list-timers --all aws-user-audit.timer
+```
+
+`OnCalendar` 应显示 `*-*-* 10:05:00 Asia/Shanghai`。当天配置时刻已过时，下一次自动执行是次日该时刻；需要当天马上生成时手动启动服务，见下文。
+
 ## 执行与投递状态
 
-等待 08:01 自动运行，或明确手动执行一次服务（**会真实采集、发送邮件**，同日自动额度仍生效）：
+等待配置的 10:05 自动运行，或明确手动执行一次服务（**会真实采集、发送邮件**，同日自动额度仍生效）：
 
 ```bash
 sudo systemctl start aws-user-audit.service
@@ -419,7 +446,7 @@ chmod 600 lark-config.json
 
 Windows 将 Python 路径替换成 `.\.venv\Scripts\python.exe`。新版诊断会在校验前输出实际配置文件的绝对路径和生效来源，校验失败时同样保留这些信息，并给出具体失败原因；可安全显示目标主机及环境变量是否覆盖文件，不回显 token。该命令没有外网请求，也不发送消息，因此不能验证远端 token 是否仍有效。需要实际推送时，使用上面的主脚本 `--send-lark` 命令。
 
-## 五、每天北京时间08:01执行
+## 五、旧单账号脚本的固定08:01定时示例（新部署使用前文配置）
 
 请使用文首的 install.sh 和 aws-user-audit.timer，不要另加 cron，以免重复采集和通知。安装不立即推送，后续停机恢复补跑最近一份已结束日报。
 

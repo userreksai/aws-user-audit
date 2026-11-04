@@ -10,6 +10,25 @@ import re
 import sys
 
 DEFAULT_INSTALL_DIR = "/usr/local/aws-user-audit"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from audit_schedule import (DEFAULT_MAIL_TIME as DEFAULT_DAILY_MAIL_TIME,
+                            DEFAULT_START_TIME as DEFAULT_REPORT_START_TIME,
+                            DEFAULT_END_TIME as DEFAULT_REPORT_END_TIME, parse_clock)
+
+
+def configured_schedule(config_path):
+    """Read only local validated configuration; missing first-install files use defaults."""
+    path = Path(config_path)
+    if path.is_symlink():
+        raise ValueError("统一配置不能为符号链接。")
+    if path.exists():
+        from audit_config import load_config
+        config = load_config(path, require_mail=False)
+    else:
+        config = {}
+    return {"daily_mail_time": config.get("DAILY_MAIL_TIME", DEFAULT_DAILY_MAIL_TIME),
+            "report_start_time": config.get("REPORT_START_TIME", DEFAULT_REPORT_START_TIME),
+            "report_end_time": config.get("REPORT_END_TIME", DEFAULT_REPORT_END_TIME)}
 
 
 def linux_path(value):
@@ -35,7 +54,9 @@ def unit_arg(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def render_units(install_dir=DEFAULT_INSTALL_DIR, publish_dir=None, config_path=None, *, catch_up=True):
+def render_units(install_dir=DEFAULT_INSTALL_DIR, publish_dir=None, config_path=None, *, catch_up=True,
+                 daily_mail_time=DEFAULT_DAILY_MAIL_TIME):
+    parse_clock(daily_mail_time, "DAILY_MAIL_TIME")
     install_dir = linux_path(install_dir)
     publish_dir = linux_path(publish_dir or str(PurePosixPath(install_dir) / "index"))
     config_path = linux_path(config_path or str(PurePosixPath(install_dir) / "aws-audit-config.json"))
@@ -67,10 +88,10 @@ StandardOutput=journal
 StandardError=journal
 """
     timer = """[Unit]
-Description=AWS audit every day at 08:01 Beijing time
+Description=AWS audit every day at """ + daily_mail_time + """ Beijing time
 
 [Timer]
-OnCalendar=*-*-* 08:01:00 Asia/Shanghai
+OnCalendar=*-*-* """ + daily_mail_time + """:00 Asia/Shanghai
 AccuracySec=1s
 RandomizedDelaySec=0
 Persistent=""" + ("true" if catch_up else "false") + """
@@ -82,7 +103,7 @@ WantedBy=timers.target
     return {"aws-user-audit.service": service, "aws-user-audit.timer": timer}
 
 
-def local_preflight(install_dir, config_path, publish_dir=None):
+def local_preflight(install_dir, config_path, publish_dir=None, *, expected_schedule=None):
     """Validate private settings/profiles locally, without AWS or SMTP requests."""
     linux_path(install_dir)
     target = Path(config_path)
@@ -101,6 +122,12 @@ def local_preflight(install_dir, config_path, publish_dir=None):
         config = load_config(target, require_mail=False)
         if config.get("AUTO_MAIL_MAX_PER_DAY", 1):
             config = load_config(target, require_mail=True)
+        if expected_schedule is not None:
+            actual = (config.get("DAILY_MAIL_TIME", DEFAULT_DAILY_MAIL_TIME),
+                      config.get("REPORT_START_TIME", DEFAULT_REPORT_START_TIME),
+                      config.get("REPORT_END_TIME", DEFAULT_REPORT_END_TIME))
+            if tuple(expected_schedule) != actual:
+                raise ValueError("生成计划后时间配置已变化，请重新运行安装器；未修改 Nginx 或 systemd。")
         if publish_dir is not None and config.get("PUBLISH_DIRECTORY") != linux_path(publish_dir):
             raise ValueError("配置 PUBLISH_DIRECTORY 必须与安装器 --publish-dir 一致；未修改配置或 Nginx。")
         profiles = sorted({validate_profile(account["AWS_PROFILE"])
@@ -138,22 +165,37 @@ def main(argv=None):
         command.add_argument("--publish-dir", required=True)
     render.add_argument("--catch-up", choices=("yes", "no"), default="yes")
     render.add_argument("--output-dir", required=True)
+    check.add_argument("--daily-mail-time", help="安装器已生成计划中的发送时刻，用于检查并发修改")
+    check.add_argument("--report-start-time")
+    check.add_argument("--report-end-time")
     args = parser.parse_args(argv)
     try:
         if args.command == "preflight":
-            local_preflight(args.install_dir, args.config, args.publish_dir)
+            expected = (args.daily_mail_time, args.report_start_time, args.report_end_time)
+            if any(value is not None for value in expected) and not all(value is not None for value in expected):
+                raise ValueError("安装计划的三个时间字段必须一起提供。")
+            local_preflight(args.install_dir, args.config, args.publish_dir,
+                            expected_schedule=expected if all(value is not None for value in expected) else None)
             print("多账号与邮件私有配置检查通过；未查询 AWS、未发送邮件或 Lark。")
             return 0
-        units = render_units(args.install_dir, args.publish_dir, args.config, catch_up=args.catch_up == "yes")
+        schedule = configured_schedule(args.config)
+        units = render_units(args.install_dir, args.publish_dir, args.config, catch_up=args.catch_up == "yes",
+                             daily_mail_time=schedule["daily_mail_time"])
         directory = Path(args.output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         for name, value in units.items():
             (directory / name).write_text(value, encoding="utf-8", newline="\n")
         plan = {"install_dir": args.install_dir, "publish_dir": args.publish_dir,
-                "config": args.config, "timezone": "Asia/Shanghai", "time": "08:01:00",
+                "config": args.config, "timezone": "Asia/Shanghai", "time": schedule["daily_mail_time"] + ":00",
+                **schedule,
                 "catch_up": args.catch_up == "yes", "installation_runs_report": False,
                 "password_authentication": False}
         (directory / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # A validated, single-line settings subset for the Bash installer; never secrets.
+        (directory / "schedule.env").write_text(
+            "DAILY_MAIL_TIME=" + schedule["daily_mail_time"] + "\n"
+            + "REPORT_START_TIME=" + schedule["report_start_time"] + "\n"
+            + "REPORT_END_TIME=" + schedule["report_end_time"] + "\n", encoding="utf-8", newline="\n")
         print("部署计划与 systemd 单元已生成；未修改系统服务。")
         return 0
     except (OSError, ValueError) as exc:

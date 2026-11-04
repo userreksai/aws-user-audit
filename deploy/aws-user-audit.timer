@@ -1,8 +1,8 @@
 [Unit]
-Description=AWS audit every day at 08:01 Beijing time
+Description=AWS audit every day at 10:05 Beijing time
 
 [Timer]
-OnCalendar=*-*-* 08:01:00 Asia/Shanghai
+OnCalendar=*-*-* 10:05:00 Asia/Shanghai
 AccuracySec=1s
 RandomizedDelaySec=0
 Persistent=true

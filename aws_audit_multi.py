@@ -65,7 +65,7 @@ def collect_account(account, audit_date, start, end, *, session_factory=None):
         errors.append(f"账号身份核验或区域发现失败（{type(exc).__name__}）；请核对配置账号、凭据、权限及网络")
     report = build_report(events, audit_date=audit_date, timezone_name="Asia/Shanghai", start=start, end=end,
                           account_id=account["ACCOUNT_ID"], regions=regions, errors=errors,
-                          region_stats=stats, window_mode="daily_25h")
+                          region_stats=stats, window_mode="configured_daily")
     report["metadata"]["account_name"] = account["NAME"]
     return report
 
@@ -111,14 +111,15 @@ def publish_accounts(reports, folders, public_dir):
 
 def run_report(config, day, *, send_mail=False, automatic_mail=False, force_resend=False,
                no_publish=False, now=None):
-    """Collect the same finished 25-hour window for every enabled account."""
+    """Collect the same configured, finished window for every enabled account."""
     from audit_alerts import notify_issues
     from audit_mail_delivery import _locked, deliver_reports
     from audit_pdf import render_report_pdf
 
     supplied_clock = now
     now = now or datetime.now(UTC)
-    audit_date, start, end, _ = resolve_window(day, "Asia/Shanghai", now=now, daily=True)
+    audit_date, start, end, _ = resolve_window(day, "Asia/Shanghai", now=now, daily=True,
+                                              daily_start=config["REPORT_START_TIME"], daily_end=config["REPORT_END_TIME"])
     if start < now - timedelta(days=90):
         raise ValueError("窗口超出 CloudTrail LookupEvents 90 天范围")
     accounts = [account for account in config["ACCOUNTS"] if account["ENABLED"]]
@@ -193,7 +194,7 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=DEFAULT_INSTALL_DIR + "/aws-audit-config.json")
-    parser.add_argument("--date", help="北京时间报表结束日期；前一天07:00至该日08:00")
+    parser.add_argument("--date", help="北京时间报表结束日期；起止时刻由 REPORT_START_TIME / REPORT_END_TIME 配置")
     parser.add_argument("--send-mail", action="store_true", help="所有账号 PDF 合并一封邮件发送")
     parser.add_argument("--automatic-mail", action="store_true", help="应用北京时间每日最多一封的自动额度")
     parser.add_argument("--force-resend", action="store_true", help="核实历史投递后显式手动重发")

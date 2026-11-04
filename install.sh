@@ -45,7 +45,9 @@ Usage: sudo bash install.sh [options]
   --help              Show this help
 
 The installer never starts aws-user-audit.service or calls AWS/SMTP/Lark.
-The timer runs daily at 08:01 Asia/Shanghai with reboot catch-up enabled.
+The timer uses DAILY_MAIL_TIME in the private JSON (default: 10:05 Asia/Shanghai).
+REPORT_START_TIME/REPORT_END_TIME set the report window (default: yesterday 10:00 to today 10:00).
+After editing times, rerun this installer to apply the systemd calendar.
 Its timestamp is advanced at install time so installation itself does not run a report.
 HELP
 }
@@ -53,6 +55,23 @@ HELP
 say() { printf '%s\n' "$*"; }
 die() { printf '安装未完成：%s\n' "$*" >&2; exit 1; }
 need_value() { [[ $# -ge 2 && -n $2 && $2 != --* ]] || die "参数 $1 缺少值。"; }
+
+read_schedule() {
+    local key value
+    DAILY_MAIL_TIME=
+    REPORT_START_TIME=
+    REPORT_END_TIME=
+    while IFS='=' read -r key value; do
+        case $key in
+            DAILY_MAIL_TIME|REPORT_START_TIME|REPORT_END_TIME) printf -v "$key" '%s' "$value" ;;
+            *) die '生成的时间计划格式无效。' ;;
+        esac
+    done <"$WORK_DIR/units/schedule.env"
+    [[ $DAILY_MAIL_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ \
+        && $REPORT_START_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ \
+        && $REPORT_END_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] \
+        || die '生成的时间计划必须为 HH:MM。'
+}
 
 while (($#)); do
     case $1 in
@@ -203,6 +222,7 @@ if ((DRY_RUN)); then
     "$PYTHON" "$SOURCE_DIR/deploy/install_support.py" render \
         --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" \
         --config "$CONFIG_PATH" --output-dir "$WORK_DIR/units"
+    read_schedule
     say '【dry-run】仅渲染临时计划；未联网、未安装软件、未修改 Nginx 或 systemd。'
     ((UPDATE == 0)) || say '实际 --update 时将临时 clone 公共仓库 main；本次使用本地代码渲染。'
     say "代码目录：$INSTALL_DIR"
@@ -211,7 +231,8 @@ if ((DRY_RUN)); then
     say "统一私有配置：$CONFIG_PATH"
     say "Nginx 配置：$NGINX_CONFIG"
     say 'Nginx 只替换 /audit/；原前端 / → 8890 和其他配置保留。'
-    say '定时：每天北京时间 08:01，启用停机补跑；安装当次不执行日报。'
+    say "定时：每天北京时间 $DAILY_MAIL_TIME，启用停机补跑；安装当次不执行日报。"
+    say "报告窗口：北京时间前一天 $REPORT_START_TIME 至报表日 $REPORT_END_TIME。"
     if [[ -r $NGINX_CONFIG ]]; then
         "$PYTHON" "$SOURCE_DIR/deploy/nginx_config.py" plan --nginx-config "$NGINX_CONFIG" \
             --publish-dir "$PUBLISH_DIR" --server-name "$SERVER_NAME" --listen-port 8889 \
@@ -259,7 +280,7 @@ if ((UPDATE)); then
     SOURCE_DIR=$WORK_DIR/source
 fi
 
-RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_config.py audit_mail.py audit_mail_delivery.py
+RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_config.py audit_schedule.py audit_mail.py audit_mail_delivery.py
     audit_pdf.py audit_alerts.py lark_notify.py requirements.txt install.sh README.md
     iam-policy.json iam-policy-single-region.json aws-audit-config.example.json
     deploy/install_support.py deploy/run_scheduled.py deploy/nginx_config.py)
@@ -286,6 +307,7 @@ fi
 "$PYTHON" "$SOURCE_DIR/deploy/install_support.py" render \
     --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" \
     --config "$CONFIG_PATH" --output-dir "$WORK_DIR/units"
+read_schedule
 cp -p -- "$NGINX_CONFIG" "$WORK_DIR/nginx-original.conf"
 "$PYTHON" "$SOURCE_DIR/deploy/nginx_config.py" plan --nginx-config "$WORK_DIR/nginx-original.conf" \
     --publish-dir "$PUBLISH_DIR" --server-name "$SERVER_NAME" --listen-port 8889 \
@@ -359,11 +381,14 @@ fi
 VENV_PYTHON=$INSTALL_DIR/.venv/bin/python
 "$VENV_PYTHON" -m pip install -r "$INSTALL_DIR/requirements.txt"
 "$VENV_PYTHON" "$INSTALL_DIR/deploy/install_support.py" preflight \
-    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" --config "$CONFIG_PATH"
+    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" --config "$CONFIG_PATH" \
+    --daily-mail-time "$DAILY_MAIL_TIME" --report-start-time "$REPORT_START_TIME" --report-end-time "$REPORT_END_TIME"
 
 systemd-analyze verify "$WORK_DIR/units/aws-user-audit.service" "$WORK_DIR/units/aws-user-audit.timer" \
     >"$WORK_DIR/systemd-verify.log" 2>&1 || die 'systemd 单元校验失败；系统配置尚未变更。'
-systemd-analyze calendar '*-*-* 08:01:00 Asia/Shanghai' >"$WORK_DIR/calendar.log" 2>&1 \
+calendar=$(awk '/^OnCalendar=/ {sub(/^OnCalendar=/, ""); print; exit}' "$WORK_DIR/units/aws-user-audit.timer")
+[[ -n $calendar ]] || die '生成的定时器缺少 OnCalendar。'
+systemd-analyze calendar "$calendar" >"$WORK_DIR/calendar.log" 2>&1 \
     || die '本机 systemd 不支持目标北京时间表达式；系统配置尚未变更。'
 
 # Backups do not end in .conf, so conf.d/*.conf never loads them.
@@ -409,7 +434,8 @@ say "网页：$PUBLISH_DIR/index.html"
 say "统一私有配置：$CONFIG_PATH"
 say "Nginx 备份：$NGINX_BACKUP"
 say "单元备份：$BACKUP_DIR"
-say '下一次执行（北京时间每天 08:01）：'
+say "报告窗口：北京时间前一天 $REPORT_START_TIME 至报表日 $REPORT_END_TIME。"
+say "下一次执行（北京时间每天 $DAILY_MAIL_TIME 开始采集，完成后发送邮件）："
 cat -- "$WORK_DIR/timer-status"
 say '诊断：systemctl status aws-user-audit.timer --no-pager'
 say '日志：journalctl -u aws-user-audit.service -n 100 --no-pager'

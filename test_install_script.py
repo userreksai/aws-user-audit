@@ -1,5 +1,6 @@
 """Exercise the installer parser/dry-run without any privileged commands."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -79,12 +80,44 @@ class InstallerShellTests(unittest.TestCase):
             self.assertFalse(marker.exists(), "dry-run called a forbidden network/system command")
             self.assertEqual(nginx.read_bytes(), original)
             self.assertIn("Persistent=true", result.stdout)
-            self.assertIn("08:01:00 Asia/Shanghai", result.stdout)
+            self.assertIn("10:05:00 Asia/Shanghai", result.stdout)
             self.assertIn("/usr/local/aws-user-audit/deploy/run_scheduled.py", result.stdout)
             self.assertIn("/usr/local/aws-user-audit/aws-audit-config.json", result.stdout)
             self.assertNotIn("--profile", result.stdout)
             self.assertNotIn("--lark-config", result.stdout)
             self.assertNotIn("--auth-state-dir", result.stdout)
+
+    @unittest.skipUnless(os.name == "posix", "Custom Linux config path in Bash integration")
+    def test_dry_run_reads_custom_schedule_without_modifying_config_or_nginx(self):
+        with tempfile.TemporaryDirectory(prefix="installer-custom-clock-") as directory:
+            temporary = Path(directory)
+            nginx = temporary / "vhost.conf"
+            original = (ROOT / "deploy/nginx-audit-8889.conf.example").read_bytes()
+            nginx.write_bytes(original)
+            config = temporary / "aws-audit-config.json"
+            content = json.dumps({"DAILY_MAIL_TIME": "09:10", "REPORT_START_TIME": "08:00", "REPORT_END_TIME": "09:00",
+                                  "AUTO_MAIL_MAX_PER_DAY": 0,
+                                  "ACCOUNTS": [{"NAME": "fixture", "ACCOUNT_ID": "123456789012", "AWS_PROFILE": "audit"}]})
+            config.write_text(content, encoding="utf-8")
+            result = self.run_installer("--dry-run", "--python", sys.executable,
+                                        "--config", str(config), "--nginx-config", str(nginx))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("OnCalendar=*-*-* 09:10:00 Asia/Shanghai", result.stdout)
+            self.assertIn("前一天 08:00 至报表日 09:00", result.stdout)
+            self.assertNotIn("10:05:00 Asia/Shanghai", result.stdout)
+            self.assertEqual(nginx.read_bytes(), original)
+            self.assertEqual(config.read_text(encoding="utf-8"), content)
+
+    @unittest.skipUnless(os.name == "posix", "Custom Linux config path in Bash integration")
+    def test_invalid_clock_in_config_stops_dry_run_before_nginx_planning(self):
+        with tempfile.TemporaryDirectory(prefix="installer-invalid-clock-") as directory:
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"DAILY_MAIL_TIME": "25:10", "AUTO_MAIL_MAX_PER_DAY": 0,
+                                         "ACCOUNTS": [{"NAME": "fixture", "ACCOUNT_ID": "123456789012"}]}), encoding="utf-8")
+            result = self.run_installer("--dry-run", "--python", sys.executable, "--config", str(config))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("DAILY_MAIL_TIME", result.stderr)
+            self.assertNotIn("候选配置已生成", result.stdout)
 
     def test_unknown_option_stops_before_system_actions(self):
         result = self.run_installer("--unexpected-option")
