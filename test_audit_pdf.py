@@ -100,10 +100,12 @@ class AuditPdfTests(unittest.TestCase):
         for value in ("AWS 账号操作审计日报", "AWS账号：123456789012", "生产账号", "2026-10-27 07:00:00",
                       "2026-10-28 08:00:00", "按 IAM 用户 / 角色统计", "账号 / 角色", "身份类型", "账号合计",
                       "hhjgx", "新增", "修改", "删除", "用户操作与事件汇总", "中文事件", "调用次数",
-                      "修改 EC2 实例属性", "Secrets Manager 查看", "报告事件 1 条", "离线输入报告"):
+                      "修改 EC2 实例属性", "Secret", "查看", "报告事件 1 条", "离线输入报告"):
             self.assertIn(value, text)
         for value in ("ModifyInstanceAttribute", "t3.medium", "i-example", "203.0.113.10",
-                      "提交参数", "身份信息", "按操作者汇总", "事件 ID", "evt-change"):
+                      "提交参数", "身份信息", "按操作者汇总", "事件 ID", "evt-change",
+                      "Secret 查看指 Secrets Manager 查看；失败数是分类次数的子集。",
+                      "同一角色的会话按角色合并统计，角色身份不直接认定为自然人。"):
             self.assertNotIn(value, text)
         self.assertEqual(report, original)
 
@@ -128,7 +130,7 @@ class AuditPdfTests(unittest.TestCase):
         text = extract(self.path)
         self.assertEqual(text.count("DeployRole"), 2)
         self.assertNotIn("PRIVATE_SESSION", text)
-        self.assertIn("同一角色的会话按角色合并统计", text)
+        self.assertNotIn("同一角色的会话按角色合并统计", text)
 
     def test_many_identities_paginate_with_repeated_headers_and_no_omissions(self):
         rows = [actor_row(f"user-{index:03d}") for index in range(140)]
