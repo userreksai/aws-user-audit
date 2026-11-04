@@ -2,7 +2,7 @@
 
 按 AWS 账号读取 CloudTrail 管理事件，每个 AWS 账号生成一份按 IAM 用户 / 角色逐行统计的中文 PDF，所有启用账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成、发布或邮件投递失败时通知群。
 
-PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行，列出身份类型、新增、修改、删除、Secrets Manager 查看、登录、其他、失败及合计，最后显示 AWS 账号合计。PDF 不展示逐条 API、参数、资源、来源 IP 或每次执行时间。身份数量较多时自动分页并重复表头，不截掉用户。
+PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行，列出身份类型、新增、修改、删除、Secrets Manager 查看、登录、其他、失败及合计，最后显示 AWS 账号合计。另有 **用户操作与事件汇总**，按“用户 / 角色 + 服务 API”合并调用，显示中文事件、调用次数和失败次数。PDF 不展示逐次执行记录、参数、资源、来源 IP 或每次执行时间。表格较长时自动分页并重复表头，不截掉用户或事件。
 
 网页与 JSON 保留详细操作：谁、北京时间几点、调用什么 API、涉及什么资源、提交什么参数以及请求结果，并补充已识别操作的中文说明和 AWS 官方 API 文档链接。普通查看忽略，Secrets Manager 查看保留。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
 
@@ -206,7 +206,19 @@ AWS 账号与 IAM 身份是两层：每个 AWS 账号一份 PDF；PDF 内每个 
 
 身份汇总依据已去重、已按查看规则过滤的事件生成，输出到 JSON 的 `actors` 字段。IAM 用户使用 ARN 或主体 ID 识别；同一角色的不同会话按签发角色合并，不把会话名称认定为自然人。Root、AWS 服务、Identity Center、联合身份和未知身份分别标注。用户与角色即使同名也不合并。分类计数包含失败请求，失败数作为其中子集单列。
 
-PDF 只读取汇总白名单，校验各身份的分类数量、失败和合计与 AWS 账号总数完全一致；不会读取或输出原始事件内容。旧报告缺少身份汇总时需要用新版程序重新生成，不能拿仅有账号总数的数据推测各 IAM 用户次数。
+PDF 只读取汇总白名单，校验各身份的分类数量、失败和合计与 AWS 账号总数完全一致；不会读取或输出原始事件内容。中文事件汇总保存在 JSON 的 `actor_events` 字段，使用相同身份识别规则，按服务/API分组，成功和失败调用合并，失败次数是调用次数的子集。旧报告缺少 `actors` 或 `actor_events` 时需要用新版程序重新生成，不能拿仅有账号总数的数据推测各 IAM 用户次数。
+
+例如 `hhjgx` 调用 `PutDashboard` 两次，其中一次失败，事件表显示一行“hhjgx / IAM 用户 / 保存 CloudWatch 监控仪表盘配置（新建或整体覆盖） / 调用 2 / 失败 1”。这个 API 可以新建仪表盘，也可以整体覆盖已有内容，仅凭事件名称不能断定是哪一种。[AWS PutDashboard 说明](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutDashboard.html)
+
+中文名称来自随代码发布的离线词典 `aws-event-translations.json` 和已审核的服务/API规则；每项保留官方来源，不在每日任务中联网翻译，也不增加 AWS 权限。JSON 的 `translation_status` 区分已审核、官方中文和待补中文。AWS 未提供可核实中文或服务/API未知时，PDF 显示原服务和事件并标记“待补中文”，不会按英文单词拼出未经核实的功能。官方服务参考中的权限动作不等于 CloudTrail 事件，词典覆盖不能保证所有 CloudTrail 事件都已翻译。[AWS 服务参考](https://docs.aws.amazon.com/service-authorization/latest/reference/service-reference.html)
+
+维护词典时可在源码目录执行以下命令；第一步联网获取 AWS 官网公开说明，第二步仅用缓存和本地 SDK 操作模型交叉核对。日常部署直接使用仓库内的词典，无需执行这些命令。词典顶部的 `statistics` 记录实际覆盖，`official_sources` 保留来源；修改词典后应重新测试并随代码发布。
+
+```bash
+.venv/bin/python tools/fetch_event_docs.py --cache-dir tmp/catalog-cache
+.venv/bin/python tools/build_event_catalog.py --cache-dir tmp/catalog-cache --offline
+.venv/bin/python -m unittest -q test_audit_event_catalog
+```
 
 ## 操作识别与“其他操作”
 

@@ -173,7 +173,7 @@ def message_body(report, report_url=""):
              "查询状态：所列查询完成。" if meta["complete"] else "查询状态：不完整；部分查询或解析失败，请检查任务日志。"]
     if meta.get("offline"):
         lines.append("离线输入报告；未向 AWS 验证数据完整性。")
-    lines.append("PDF 附件按 IAM 用户 / 角色逐行汇总各类操作次数；具体操作明细见网页或本地 JSON 报告。")
+    lines.append("PDF 附件按 IAM 用户 / 角色汇总操作分类及中文事件的调用、失败次数；具体执行明细见网页或本地 JSON 报告。")
     if report_url:
         lines.append("网页详情：" + _line(report_url, 2048))
     lines.append("CloudTrail 日志可能延迟到达；API 请求未报错不代表异步操作最终完成。")

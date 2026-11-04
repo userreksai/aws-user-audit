@@ -150,6 +150,10 @@ class MultiAccountTests(unittest.TestCase):
             self.assertIn("IAM", text)
             self.assertEqual(structured["actors"][0]["actor"], "hhjgx")
             self.assertEqual(structured["actors"][0]["counts"]["修改"], 1)
+            self.assertEqual(structured["actor_events"][0]["actor"], "hhjgx")
+            self.assertEqual(structured["actor_events"][0]["total"], 1)
+            self.assertNotEqual(structured["actor_events"][0]["translation_status"], "untranslated")
+            self.assertIn("用户操作与事件汇总", text)
             for detail in ("ModifyInstanceAttribute", "t3.medium", "i-fictional", "203.0.113.4"):
                 self.assertNotIn(detail, text)
                 self.assertIn(detail, html.read_text(encoding="utf-8"))
@@ -222,6 +226,48 @@ class MultiAccountTests(unittest.TestCase):
         for name in ("beiou", "hhjgx", "DeployRole", "账号合计"):
             self.assertIn(name, text)
         for detail in ("ModifyInstanceAttribute", "i-fictional", "session-one", "session-two", "203.0.113.4", EVENT_SECRET):
+            self.assertNotIn(detail, text)
+
+    def test_dashboard_user_event_summary_merges_failed_calls_without_changing_user_totals(self):
+        config, _ = self.config()
+        factory, sessions = self.factory(config["ACCOUNTS"])
+        account_id = config["ACCOUNTS"][0]["ACCOUNT_ID"]
+        session = sessions[config["ACCOUNTS"][0]["AWS_ACCESS_KEY_ID"]]
+        trail = session.client("cloudtrail", region_name="eu-north-1")
+        records = []
+        for index, name in enumerate(("beiou", "hhjgx", "hhjgx")):
+            item = event(account_id)
+            item.update(eventID=f"dashboard-{index}", eventSource="monitoring.amazonaws.com",
+                        eventName="PutDashboard", requestParameters={"DashboardBody": EVENT_SECRET})
+            item["userIdentity"].update(userName=name, arn=f"arn:aws:iam::{account_id}:user/{name}")
+            if index == 2:
+                item["errorCode"] = "AccessDenied"
+            records.append(item)
+        # LookupEvents can return the same event through more than one query.
+        records.append(deepcopy(records[1]))
+        def lookup(**options):
+            values = records if options["LookupAttributes"][0]["AttributeKey"] == "ReadOnly" else []
+            return {"Events": [{"EventId": item["eventID"], "CloudTrailEvent": json.dumps(item)} for item in values]}
+        trail.lookup_events = Mock(side_effect=lookup)
+        with patch("audit_mail.send_reports") as smtp, patch("lark_notify._send_payload") as lark:
+            self.assertEqual(self.execute_report(config, factory), 0, self.stderr.getvalue())
+        smtp.assert_not_called()
+        lark.assert_not_called()
+        archive = Path(config["OUTPUT_DIRECTORY"]) / account_id / "2026-11-04"
+        report = json.loads((archive / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["metadata"]["total"], 3)
+        self.assertEqual(report["metadata"]["failed_or_partial"], 1)
+        self.assertEqual({row["actor"]: (row["counts"]["修改"], row["failed"])
+                          for row in report["actors"]}, {"beiou": (1, 0), "hhjgx": (2, 1)})
+        self.assertEqual({row["actor"]: (row["total"], row["failed"])
+                          for row in report["actor_events"]}, {"beiou": (1, 0), "hhjgx": (2, 1)})
+        for row in report["actor_events"]:
+            self.assertEqual(row["event_label"], "保存 CloudWatch 监控仪表盘配置（新建或整体覆盖）")
+        pdf = archive / f"{account_id}-2026-11-04-aws操作审计.pdf"
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+        for expected in ("beiou", "hhjgx", "用户操作与事件汇总", "CloudWatch", "整体覆盖"):
+            self.assertIn(expected, text)
+        for detail in ("PutDashboard", EVENT_SECRET, "203.0.113.4", "dashboard-0", "2026-11-03 12:15:00"):
             self.assertNotIn(detail, text)
 
     def test_each_account_uses_its_own_explicit_credentials_or_profile(self):
