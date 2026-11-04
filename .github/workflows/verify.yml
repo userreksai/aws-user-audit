@@ -37,6 +37,6 @@ jobs:
       - name: Install syntax-check tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends nginx systemd
-      - name: Validate generated units and isolated Nginx configuration
+          sudo apt-get install -y --no-install-recommends systemd
+      - name: Validate generated systemd units
         run: python deploy/verify_linux.py

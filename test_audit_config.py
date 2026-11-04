@@ -23,9 +23,11 @@ class ConfigTests(unittest.TestCase):
     def test_paths_defaults_and_profile(self):
         config = self.load()
         self.assertEqual(config["OUTPUT_DIRECTORY"], str(self.root / "reports"))
-        self.assertEqual(config["PUBLISH_DIRECTORY"], str(self.root / "index"))
+        self.assertNotIn("PUBLISH_DIRECTORY", config)
+        self.assertNotIn("REPORT_URL", config)
         self.assertEqual(config["STATE_DIRECTORY"], str(self.root / ".state"))
         self.assertEqual(config["ACCOUNTS"][0]["AWS_PROFILE"], "audit")
+        self.assertEqual(config["ACCOUNTS"][0]["TAG"], "")
         self.assertEqual(config["TIMEZONE"], "Asia/Shanghai")
         self.assertEqual(config["DAILY_MAIL_TIME"], "10:05")
         self.assertEqual(config["REPORT_START_TIME"], "10:00")
@@ -53,6 +55,26 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config["SMTP_AUTH_CODE"])
         self.assertFalse(config["LARK_WEBHOOK_URL"])
         self.assertTrue(all(not a["AWS_SECRET_ACCESS_KEY"] for a in config["ACCOUNTS"]))
+        self.assertTrue(all(a["TAG"] for a in config["ACCOUNTS"]))
+        self.assertNotIn("PUBLISH_DIRECTORY", config)
+        self.assertNotIn("REPORT_URL", config)
+
+    def test_account_tag_supports_chinese_and_missing_tag_does_not_modify_file(self):
+        config = self.load({"ACCOUNTS": [{**self.account, "TAG": "  prod-支付  "}]})
+        self.assertEqual(config["ACCOUNTS"][0]["TAG"], "prod-支付")
+        self.assertEqual(config["ACCOUNTS"][0]["NAME"], "demo")
+        self.load()
+        original = self.path.read_bytes()
+        self.assertEqual(load_config(self.path)["ACCOUNTS"][0]["TAG"], "")
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertNotIn("TAG", json.loads(original)["ACCOUNTS"][0])
+
+    def test_account_tag_length_type_and_control_characters(self):
+        self.assertEqual(self.load({"ACCOUNTS": [{**self.account, "TAG": "中" * 120}]})["ACCOUNTS"][0]["TAG"], "中" * 120)
+        for tag in ("中" * 121, None, 1, [], "bad\nFAKE_SECRET", "bad\x00FAKE_SECRET", "bad\u0085FAKE_SECRET", "bad\u202eFAKE_SECRET", "\u0085FAKE_SECRET", "FAKE_SECRET\u2028"):
+            with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "TAG") as caught:
+                self.load({"ACCOUNTS": [{**self.account, "TAG": tag}]})
+            self.assertNotIn("FAKE_SECRET", str(caught.exception))
 
     def test_blank_smtp_only_allowed_when_not_requiring_delivery(self):
         self.load()
@@ -96,16 +118,26 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(concurrency=concurrency), self.assertRaises(ValueError):
                 self.load({**self.raw, "ACCOUNT_CONCURRENCY": concurrency})
 
-    def test_unified_config_private_paths_cannot_be_published(self):
-        for patch in ({"PUBLISH_DIRECTORY": "."}, {"OUTPUT_DIRECTORY": "index/reports"},
-                      {"STATE_DIRECTORY": "index/.state"}, {"STATE_DIRECTORY": "reports"}):
+    def test_report_and_state_paths_protect_private_config(self):
+        for patch in ({"OUTPUT_DIRECTORY": "."}, {"STATE_DIRECTORY": "."},
+                      {"OUTPUT_DIRECTORY": self.path.name}, {"STATE_DIRECTORY": self.path.name},
+                      {"STATE_DIRECTORY": "reports"}):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 self.load({**self.raw, **patch})
 
-    def test_fixed_beijing_timezone_and_https_details(self):
-        for patch in ({"TIMEZONE": "UTC"}, {"REPORT_URL": "http://example.com/audit/"}):
-            with self.subTest(patch=patch), self.assertRaises(ValueError):
-                self.load({**self.raw, **patch})
+    def test_fixed_beijing_timezone(self):
+        with self.assertRaises(ValueError):
+            self.load({**self.raw, "TIMEZONE": "UTC"})
+
+    def test_old_web_fields_are_inert_and_do_not_require_web_directory_checks(self):
+        for patch in ({"PUBLISH_DIRECTORY": ".", "REPORT_URL": "http://example.com/audit/"},
+                      {"PUBLISH_DIRECTORY": ["old", "unused"], "REPORT_URL": None},
+                      {"OUTPUT_DIRECTORY": "index/reports", "STATE_DIRECTORY": "index/.state"}):
+            with self.subTest(patch=patch):
+                config = self.load({**self.raw, **patch})
+                for key in ("PUBLISH_DIRECTORY", "REPORT_URL"):
+                    if key in patch:
+                        self.assertEqual(config[key], patch[key])
 
     def test_enabled_lark_requires_valid_robot_but_disabled_may_be_blank(self):
         with self.assertRaisesRegex(ValueError, "LARK_WEBHOOK_URL"):

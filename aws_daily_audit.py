@@ -564,13 +564,15 @@ def render_html(report):
 </body></html>'''
 
 
-def write_report(report, output_dir):
+def write_report(report, output_dir, *, include_html=True):
+    """Archive JSON; legacy single-account callers may also request HTML assets."""
     meta = report["metadata"]
     safe_account = re.sub(r"[^a-zA-Z0-9_-]", "_", str(meta["account_id"]))
     folder = Path(output_dir) / safe_account / meta["audit_date"]
     folder.mkdir(parents=True, exist_ok=True)
-    files = list(report_assets().items()) + [("report.json", json.dumps(report, ensure_ascii=False, indent=2, default=str)),
-                                           (f"{meta['audit_date']}-aws操作审计.html", render_html(report))]
+    files = [("report.json", json.dumps(report, ensure_ascii=False, indent=2, default=str))]
+    if include_html:
+        files = list(report_assets().items()) + files + [(f"{meta['audit_date']}-aws操作审计.html", render_html(report))]
     for name, content in files:
         target = folder / name
         temp = folder / (name + ".tmp")

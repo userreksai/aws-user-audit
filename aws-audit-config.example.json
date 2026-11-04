@@ -3,9 +3,7 @@
 {
   // 相对路径以本配置所在目录为起点。安装默认目录为 /usr/local/aws-user-audit。
   "OUTPUT_DIRECTORY": "reports",
-  "PUBLISH_DIRECTORY": "index",
   "STATE_DIRECTORY": ".state",
-  "REPORT_URL": "https://zybocedata-pass.v668live.com/audit/",
   "TIMEZONE": "Asia/Shanghai",
   // 每日启动采集、生成和发信的北京时间；邮件在采集/PDF完成后提交。修改后重跑install.sh更新定时器。
   "DAILY_MAIL_TIME": "10:05",
@@ -29,16 +27,18 @@
   "MAIL_SENDER_NAME": "",
   // 可选中文 TTF/TTC；留空自动寻找文泉驿或宋体，否则使用中文 CID 字体。
   "PDF_FONT_PATH": "",
-  // Lark 仅发采集、生成、网页发布或邮件投递异常。填写机器人地址后改为 true。
+  // Lark 仅发采集、PDF生成或邮件投递异常。填写机器人地址后改为 true。
   "LARK_ALERTS_ENABLED": false,
   "LARK_WEBHOOK_URL": "",
   "LARK_SIGNING_SECRET": "",
   // 不自动删除历史报告。此处不会继承 RDS 的 SQL、IP过滤、分段采集或保留期设置。
   // NAME 和 ACCOUNT_ID 分别唯一。先替换账号1的占位ID，其余账号配置好后再 ENABLED=true。
+  // TAG 是邮件中的可选账号标签，支持中文、最多120字符；如 prod-支付。邮件展示 TAG-ACCOUNT_ID。
   // profile 和 Key 二选一；都留空使用默认凭据链。临时凭据需填写 Token。
   "ACCOUNTS": [
     {
       "NAME": "account-1",
+      "TAG": "示例-账号1",
       "ACCOUNT_ID": "000000000001",
       "ENABLED": true,
       "AWS_PROFILE": "audit",
@@ -49,6 +49,7 @@
     },
     {
       "NAME": "account-2",
+      "TAG": "示例-账号2",
       "ACCOUNT_ID": "000000000002",
       "ENABLED": false,
       "AWS_PROFILE": "",
@@ -59,6 +60,7 @@
     },
     {
       "NAME": "account-3",
+      "TAG": "示例-账号3",
       "ACCOUNT_ID": "000000000003",
       "ENABLED": false,
       "AWS_PROFILE": "",
@@ -69,6 +71,7 @@
     },
     {
       "NAME": "account-4",
+      "TAG": "示例-账号4",
       "ACCOUNT_ID": "000000000004",
       "ENABLED": false,
       "AWS_PROFILE": "",
@@ -79,6 +82,7 @@
     },
     {
       "NAME": "account-5",
+      "TAG": "示例-账号5",
       "ACCOUNT_ID": "000000000005",
       "ENABLED": false,
       "AWS_PROFILE": "",
@@ -89,6 +93,7 @@
     },
     {
       "NAME": "account-6",
+      "TAG": "示例-账号6",
       "ACCOUNT_ID": "000000000006",
       "ENABLED": false,
       "AWS_PROFILE": "",
@@ -99,6 +104,7 @@
     },
     {
       "NAME": "account-7",
+      "TAG": "示例-账号7",
       "ACCOUNT_ID": "000000000007",
       "ENABLED": false,
       "AWS_PROFILE": "",

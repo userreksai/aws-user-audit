@@ -119,7 +119,7 @@ class MultiAccountTests(unittest.TestCase):
             return multi.run_report(config, "2026-11-04", now=NOW, **options)
 
     def test_7_accounts_produce_separate_real_pdfs_and_one_combined_mail_with_no_secret_leak(self):
-        accounts = [account(number) for number in range(1, 8)]
+        accounts = [account(number, TAG=f"生产账号-{number}") for number in range(1, 8)]
         config, _ = self.config(accounts)
         factory, sessions = self.factory(accounts)
         with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp, \
@@ -134,9 +134,10 @@ class MultiAccountTests(unittest.TestCase):
         for row in accounts:
             expected = row["ACCOUNT_ID"]
             archive = Path(config["OUTPUT_DIRECTORY"]) / expected / "2026-11-04"
-            html = archive / "2026-11-04-aws操作审计.html"
             structured = json.loads((archive / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(structured["metadata"]["account_id"], expected)
+            self.assertEqual(structured["metadata"]["account_tag"], row["TAG"])
+            self.assertIn(row["TAG"], smtp.call_args.args[2])
             self.assertEqual(structured["metadata"]["counts"]["修改"], 1)
             self.assertEqual(len(structured["events"]), 1)
             self.assertEqual(structured["events"][0]["actor"], "hhjgx")
@@ -156,15 +157,15 @@ class MultiAccountTests(unittest.TestCase):
             self.assertIn("用户操作与事件汇总", text)
             for detail in ("ModifyInstanceAttribute", "t3.medium", "i-fictional", "203.0.113.4"):
                 self.assertNotIn(detail, text)
-                self.assertIn(detail, html.read_text(encoding="utf-8"))
-            self.assertTrue(html.is_file())
-            self.assertTrue((Path(config["PUBLISH_DIRECTORY"]) / expected / "index.html").is_file())
-            for content in (html.read_text(encoding="utf-8"), json.dumps(structured), text):
+                self.assertIn(detail, json.dumps(structured))
+            self.assertEqual({path.name for path in archive.iterdir()}, {pdf.name, "report.json"})
+            if os.name == "posix":
+                self.assertEqual((archive / "report.json").stat().st_mode & 0o777, 0o600)
+            for content in (json.dumps(structured), text):
                 for secret in (SECRET, EVENT_SECRET, PROVIDER_SECRET, "TEST_SMTP_SECRET", row["AWS_ACCESS_KEY_ID"]):
                     self.assertNotIn(secret, content)
-        overview = (Path(config["PUBLISH_DIRECTORY"]) / "index.html").read_text(encoding="utf-8")
-        for row in accounts:
-            self.assertIn(row["ACCOUNT_ID"] + "/", overview)
+        self.assertFalse((self.root / "index").exists())
+        self.assertNotIn(config["REPORT_URL"], smtp.call_args.args[2])
         for session in sessions.values():
             for client in session.cloudtrails.values():
                 for call in client.calls:
@@ -172,6 +173,35 @@ class MultiAccountTests(unittest.TestCase):
                     self.assertEqual(call["StartTime"], datetime(2026, 11, 2, 23, tzinfo=timezone.utc))
                     self.assertEqual(call["EndTime"], datetime(2026, 11, 4, 0, tzinfo=timezone.utc))
         lark.assert_not_called()
+
+    def test_three_accounts_share_one_pdf_mail_without_any_web_configuration(self):
+        accounts = [account(number, TAG=f"测试环境-{number}") for number in range(1, 4)]
+        config, _ = self.config(accounts)
+        config.pop("PUBLISH_DIRECTORY")
+        config.pop("REPORT_URL")
+        factory, _ = self.factory(accounts)
+        with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp, \
+             patch("lark_notify._send_payload") as lark:
+            result = self.execute_report(config, factory, send_mail=True)
+        self.assertEqual(result, 0, self.stderr.getvalue())
+        smtp.assert_called_once()
+        self.assertEqual(len(smtp.call_args.args[1]), 3)
+        for selected in accounts:
+            self.assertIn(selected["ACCOUNT_ID"], smtp.call_args.args[2])
+            self.assertIn(selected["TAG"], smtp.call_args.args[2])
+        lark.assert_not_called()
+
+    def test_collect_account_preserves_name_and_defaults_missing_tag_to_empty(self):
+        selected = account()
+        self.assertNotIn("TAG", selected)
+        session = FakeSession(selected["ACCOUNT_ID"])
+        day, start, end, _ = resolve_window("2026-11-04", "Asia/Shanghai", now=NOW, daily=True)
+        report = multi.collect_account(selected, day, start, end, session_factory=lambda **kwargs: session)
+        self.assertEqual(report["metadata"]["account_name"], selected["NAME"])
+        self.assertEqual(report["metadata"]["account_tag"], "")
+        selected["TAG"] = "AWS 生产环境"
+        report = multi.collect_account(selected, day, start, end, session_factory=lambda **kwargs: session)
+        self.assertEqual(report["metadata"]["account_tag"], selected["TAG"])
 
     def test_identity_mismatch_stops_region_discovery_and_cloudtrail_before_reading_other_account(self):
         selected = account(REGIONS="all")
@@ -394,15 +424,30 @@ class MultiAccountTests(unittest.TestCase):
                 multi.run_report(config, "2026-11-04", now=datetime(2026, 11, 4, 1, 59, tzinfo=timezone.utc))
         factory.assert_not_called()
 
-    def test_web_failure_does_not_prevent_mail_and_omits_stale_web_link(self):
+    def test_reports_and_mail_have_no_web_generation_or_publication_dependency(self):
         config, _ = self.config()
+        legacy_web = self.root / "legacy-public"
+        legacy_web.mkdir()
+        (legacy_web / "index.html").write_text("LEGACY_UNCHANGED", encoding="utf-8")
+        config["PUBLISH_DIRECTORY"] = str(legacy_web)
         factory, _ = self.factory(config["ACCOUNTS"])
-        with patch.object(multi, "publish_accounts", side_effect=OSError(PROVIDER_SECRET)), \
+        with patch("aws_daily_audit.render_html", side_effect=AssertionError("HTML must not render")) as html, \
+             patch("aws_daily_audit.report_assets", side_effect=AssertionError("Assets must not load")) as assets, \
+             patch("aws_daily_audit.publish_report", side_effect=AssertionError("Public files must not change")) as publish, \
              patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
-            self.assertEqual(self.execute_report(config, factory, send_mail=True), 4)
+            self.assertEqual(self.execute_report(config, factory, send_mail=True, no_publish=True), 0)
         smtp.assert_called_once()
+        html.assert_not_called()
+        assets.assert_not_called()
+        publish.assert_not_called()
+        self.assertFalse(hasattr(multi, "publish_accounts"))
+        self.assertEqual((legacy_web / "index.html").read_text(encoding="utf-8"), "LEGACY_UNCHANGED")
         self.assertNotIn(config["REPORT_URL"], smtp.call_args.args[2])
-        self.assertNotIn(PROVIDER_SECRET, self.stderr.getvalue())
+        self.assertNotIn("网页", self.stdout.getvalue())
+        archive = Path(config["OUTPUT_DIRECTORY"])
+        self.assertFalse(list(archive.rglob("*.html")))
+        self.assertFalse(list(archive.rglob("*.css")))
+        self.assertFalse(list(archive.rglob("*.js")))
 
     def test_failed_pdf_prevents_partial_account_mail_but_other_pdf_is_retained(self):
         import audit_pdf
@@ -425,7 +470,7 @@ class MultiAccountTests(unittest.TestCase):
         with patch("boto3.Session") as aws, patch("audit_mail.send_reports") as smtp, \
              patch("lark_notify._send_payload") as lark, patch("socket.create_connection") as network, \
              redirect_stdout(self.stdout), redirect_stderr(self.stderr):
-            self.assertEqual(multi.main(["--config", str(path), "--check-config"]), 0)
+            self.assertEqual(multi.main(["--config", str(path), "--check-config", "--no-publish"]), 0)
         aws.assert_not_called()
         smtp.assert_not_called()
         lark.assert_not_called()
@@ -447,11 +492,16 @@ class MultiAccountTests(unittest.TestCase):
         smtp.assert_called_once()
 
     def test_disabled_accounts_do_not_create_sessions_or_report_files(self):
-        accounts = [account(1), account(2, ENABLED=False)]
+        accounts = [account(1, TAG="保留账号"), account(2, ENABLED=False, TAG="禁用账号")]
         config, _ = self.config(accounts)
         factory, _ = self.factory(accounts)
-        self.assertEqual(self.execute_report(config, factory), 0)
+        with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 0)
         self.assertEqual(factory.call_count, 1)
+        smtp.assert_called_once()
+        self.assertEqual(len(smtp.call_args.args[1]), 1)
+        self.assertNotIn(accounts[1]["ACCOUNT_ID"], smtp.call_args.args[2])
+        self.assertNotIn(accounts[1]["TAG"], smtp.call_args.args[2])
         self.assertFalse((Path(config["OUTPUT_DIRECTORY"]) / accounts[1]["ACCOUNT_ID"]).exists())
 
     def test_unfinished_window_is_rejected_before_resolving_any_aws_credentials(self):
@@ -467,7 +517,7 @@ class MultiAccountTests(unittest.TestCase):
         self.assertEqual(Path(config["STATE_DIRECTORY"]), self.root / ".state")
         raw = json.loads(path.read_text(encoding="utf-8").split("\n", 1)[1])
         for updates in ({"ACCOUNTS": [account(1), account(2, ACCOUNT_ID=account(1)["ACCOUNT_ID"])]},
-                        {"PUBLISH_DIRECTORY": "."}, {"STATE_DIRECTORY": "index/private"},
+                        {"OUTPUT_DIRECTORY": "."}, {"STATE_DIRECTORY": "reports"},
                         {"TIMEZONE": "UTC"}, {"ACCOUNTS": [account(AWS_PROFILE="other")]},
                         {"ACCOUNTS": [account(AWS_SECRET_ACCESS_KEY="")]}):
             candidate = deepcopy(raw)

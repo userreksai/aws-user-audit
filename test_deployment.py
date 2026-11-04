@@ -72,11 +72,12 @@ class SystemdUnitRenderTests(unittest.TestCase):
             with self.subTest(install_dir=install_dir), self.assertRaises(ValueError):
                 install_support.render_units(install_dir=install_dir)
 
-    def test_public_webroot_cannot_contain_code_reports_or_private_config(self):
-        for arguments in ({"publish_dir": INSTALL}, {"publish_dir": INSTALL + "/reports"},
-                          {"config_path": INSTALL + "/index/aws-audit-config.json"}):
-            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
-                install_support.render_units(**arguments)
+    def test_legacy_publish_argument_is_ignored_without_rendering_web_paths(self):
+        expected = install_support.render_units()
+        for publish_dir in (INSTALL, INSTALL + "/reports", "/missing/legacy-webroot"):
+            with self.subTest(publish_dir=publish_dir):
+                self.assertEqual(install_support.render_units(publish_dir=publish_dir), expected)
+                self.assertNotIn(publish_dir + "/index.html", expected["aws-user-audit.service"])
 
 
 class LocalPreflightTests(unittest.TestCase):
@@ -154,9 +155,13 @@ class LocalPreflightTests(unittest.TestCase):
                 if stage == "config":
                     session.assert_not_called()
 
-    def test_nginx_publish_mismatch_stops_before_credentials(self):
-        with patch.object(audit_config, "load_config", return_value=self.config), self.assertRaisesRegex(ValueError, "PUBLISH_DIRECTORY"):
-            install_support.local_preflight(INSTALL, self.path, "/srv/other/index")
+    def test_legacy_publish_argument_has_no_effect_on_local_configuration(self):
+        self.config.update(AUTO_MAIL_MAX_PER_DAY=0, ACCOUNTS=[{"AWS_PROFILE": ""}])
+        original = self.path.read_bytes()
+        with patch.object(audit_config, "load_config", return_value=self.config):
+            result = install_support.local_preflight(INSTALL, self.path, "/missing/legacy-webroot")
+        self.assertEqual(result, self.config)
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_schedule_changed_after_render_stops_before_credentials(self):
         self.config.update(DAILY_MAIL_TIME="11:05", REPORT_START_TIME="10:00", REPORT_END_TIME="10:00")
@@ -181,7 +186,7 @@ class LocalPreflightTests(unittest.TestCase):
         self.path.write_text(json.dumps({"AUTO_MAIL_MAX_PER_DAY": 0, "ACCOUNTS": [{"NAME": "test",
             "ACCOUNT_ID": "123456789012", "AWS_ACCESS_KEY_ID": "TEST_KEY", "AWS_SECRET_ACCESS_KEY": "TEST_SECRET"}]}), encoding="utf-8")
         config = install_support.local_preflight(INSTALL, self.path)
-        self.assertEqual(config["PUBLISH_DIRECTORY"], str((self.root / "index").resolve()))
+        self.assertNotIn("PUBLISH_DIRECTORY", config)
         self.assertEqual(config["ACCOUNTS"][0]["AWS_PROFILE"], "")
 
 
@@ -291,12 +296,15 @@ class ConfiguredScheduleTests(unittest.TestCase):
         output = self.root / "generated"
         schedule = {"daily_mail_time": "09:10", "report_start_time": "08:00", "report_end_time": "09:00"}
         with patch.object(install_support, "configured_schedule", return_value=schedule), redirect_stdout(io.StringIO()):
-            result = install_support.main(["render", "--install-dir", INSTALL, "--publish-dir", INSTALL + "/index",
+            result = install_support.main(["render", "--install-dir", INSTALL,
                                             "--config", INSTALL + "/aws-audit-config.json", "--output-dir", str(output)])
         self.assertEqual(result, 0)
         plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
         self.assertEqual(plan["time"], "09:10:00")
         self.assertEqual(plan["report_end_time"], "09:00")
+        self.assertEqual(plan["report_formats"], ["pdf", "json"])
+        self.assertFalse(plan["html_publication"])
+        self.assertNotIn("publish_dir", plan)
         self.assertEqual((output / "schedule.env").read_text(encoding="utf-8"),
                          "DAILY_MAIL_TIME=09:10\nREPORT_START_TIME=08:00\nREPORT_END_TIME=09:00\n")
         self.assertIn("OnCalendar=*-*-* 09:10:00 Asia/Shanghai", (output / "aws-user-audit.timer").read_text(encoding="utf-8"))

@@ -5,15 +5,12 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-import html
 import os
 from pathlib import Path
 import sys
-import tempfile
 
 from audit_config import DEFAULT_INSTALL_DIR, load_config
-from aws_daily_audit import (CATEGORIES, build_report, collect_region, publish_report,
-                             report_assets, resolve_window, write_report)
+from aws_daily_audit import build_report, collect_region, resolve_window, write_report
 
 UTC = timezone.utc
 
@@ -67,46 +64,8 @@ def collect_account(account, audit_date, start, end, *, session_factory=None):
                           account_id=account["ACCOUNT_ID"], regions=regions, errors=errors,
                           region_stats=stats, window_mode="configured_daily")
     report["metadata"]["account_name"] = account["NAME"]
+    report["metadata"]["account_tag"] = account.get("TAG", "")
     return report
-
-
-def _public_file(target, content):
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-    descriptor, temporary = tempfile.mkstemp(prefix=".audit-index-", dir=target.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(content)
-        Path(temporary).chmod(0o644)
-        os.replace(temporary, target)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
-def publish_accounts(reports, folders, public_dir):
-    """Publish each account and commit an overview after all detail pages succeed."""
-    public = Path(public_dir)
-    rows = []
-    for report, folder in zip(reports, folders):
-        meta = report["metadata"]
-        account_id = meta["account_id"]
-        publish_report(folder / f"{meta['audit_date']}-aws操作审计.html", public / account_id)
-        counts = meta["counts"]
-        cells = "".join(f"<td>{counts.get(category, 0)}</td>" for category in CATEGORIES)
-        name = html.escape(str(meta.get("account_name", "")))
-        state = "查询完成" if meta["complete"] else "采集不完整"
-        rows.append(f'<tr><td><a href="{account_id}/">{name} ({account_id})</a></td>{cells}<td>{state}</td></tr>')
-    for name, content in report_assets().items():
-        _public_file(public / name, content)
-    headers = "".join(f"<th>{html.escape(category)}</th>" for category in CATEGORIES)
-    day = html.escape(str(reports[0]["metadata"]["audit_date"]))
-    page = ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>AWS 多账号操作审计日报</title><link rel="stylesheet" href="audit-report.css"></head><body>'
-            f'<h1>AWS 多账号操作审计日报 · {day}</h1><section><h2>账号总览</h2><div class="scroll"><table>'
-            f'<thead><tr><th>账号（点击查看操作明细）</th>{headers}<th>查询状态</th></tr></thead>'
-            f'<tbody>{"".join(rows)}</tbody></table></div></section></body></html>')
-    _public_file(public / "index.html", page)
 
 
 def run_report(config, day, *, send_mail=False, automatic_mail=False, force_resend=False,
@@ -130,7 +89,7 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not state.is_dir() or (os.name == "posix" and state.stat().st_mode & 0o077):
         raise ValueError("状态目录须仅任务用户可访问，请设置为 0700")
-    # A job lock keeps reports, web publication and notifications from racing.
+    # A job lock keeps private reports and notifications from racing.
     with _locked(state / "job"):
         archive = Path(config["OUTPUT_DIRECTORY"])
         archive.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -138,15 +97,14 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
             archive.chmod(0o700)
         with ThreadPoolExecutor(max_workers=min(config["ACCOUNT_CONCURRENCY"], len(accounts))) as pool:
             reports = list(pool.map(lambda account: collect_account(account, audit_date, start, end), accounts))
-        folders, pdfs = [], []
+        pdfs = []
         for report in reports:
             meta = report["metadata"]
             account = meta["account_id"]
             if not meta["complete"]:
                 issues.append({"account_id": account, "stage": "collection"})
             try:
-                folder = write_report(report, config["OUTPUT_DIRECTORY"])
-                folders.append(folder)
+                folder = write_report(report, config["OUTPUT_DIRECTORY"], include_html=False)
                 pdf = folder / f"{account}-{audit_date}-aws操作审计.pdf"
                 render_report_pdf(report, pdf, config.get("PDF_FONT_PATH") or None)
                 pdfs.append(pdf)
@@ -154,13 +112,6 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
             except Exception as exc:
                 issues.append({"account_id": account, "stage": "pdf"})
                 print(f"账号 {account} 报告生成失败（{type(exc).__name__}）；其他账号继续。", file=sys.stderr)
-        if not no_publish and len(folders) == len(reports):
-            try:
-                publish_accounts(reports, folders, config["PUBLISH_DIRECTORY"])
-                print("多账号网页已更新。", flush=True)
-            except Exception as exc:
-                issues.append({"stage": "publish"})
-                print(f"网页发布失败（{type(exc).__name__}）；仍尝试发送完整 PDF 附件。", file=sys.stderr)
         if send_mail:
             if len(pdfs) != len(reports):
                 issues.append({"stage": "mail"})
@@ -168,9 +119,7 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
             else:
                 result = deliver_reports(reports, pdfs, config, config["STATE_DIRECTORY"],
                                          automatic=automatic_mail, force_resend=force_resend,
-                                         now=supplied_clock or datetime.now(UTC),
-                                         report_url="" if no_publish or any(i["stage"] == "publish" for i in issues)
-                                         else config["REPORT_URL"])
+                                         now=supplied_clock or datetime.now(UTC))
                 status = result["status"]
                 if status in {"failed", "uncertain"}:
                     issues.append({"stage": "mail"})
@@ -188,7 +137,7 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
             return 5
         if any(item["stage"] == "mail" for item in issues) or alert["failed"]:
             return 3
-        return 4 if issues else 0
+        return 0
 
 
 def main(argv=None):
@@ -198,7 +147,8 @@ def main(argv=None):
     parser.add_argument("--send-mail", action="store_true", help="所有账号 PDF 合并一封邮件发送")
     parser.add_argument("--automatic-mail", action="store_true", help="应用北京时间每日最多一封的自动额度")
     parser.add_argument("--force-resend", action="store_true", help="核实历史投递后显式手动重发")
-    parser.add_argument("--no-publish", action="store_true")
+    # Accepted for old launch commands; multi-account jobs never publish HTML.
+    parser.add_argument("--no-publish", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--check-config", action="store_true", help="只校验本地配置，不调用 AWS/SMTP/Lark")
     args = parser.parse_args(argv)
     config = None
