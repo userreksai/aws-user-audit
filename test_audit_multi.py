@@ -145,9 +145,10 @@ class MultiAccountTests(unittest.TestCase):
             self.assertTrue(pdf.read_bytes().startswith(b"%PDF-"))
             text = "\n".join(page.extract_text() for page in PdfReader(pdf).pages)
             self.assertIn(expected, text)
-            self.assertIn("hhjgx", text)
-            self.assertIn("ModifyInstanceAttribute", text)
-            self.assertIn("t3.medium", text)
+            self.assertEqual(len(PdfReader(pdf).pages), 1)
+            for detail in ("hhjgx", "ModifyInstanceAttribute", "t3.medium", "i-fictional", "203.0.113.4"):
+                self.assertNotIn(detail, text)
+                self.assertIn(detail, html.read_text(encoding="utf-8"))
             self.assertTrue(html.is_file())
             self.assertTrue((Path(config["PUBLISH_DIRECTORY"]) / expected / "index.html").is_file())
             for content in (html.read_text(encoding="utf-8"), json.dumps(structured), text):

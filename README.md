@@ -1,8 +1,10 @@
 # AWS 多账号操作审计：PDF 邮件日报
 
-按账号读取 CloudTrail 管理事件，每账号生成一份中文 PDF，所有启用账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成、发布或邮件投递失败时通知群。
+按账号读取 CloudTrail 管理事件，每账号生成一份单页中文统计 PDF，所有启用账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成、发布或邮件投递失败时通知群。
 
-保留原有操作明细：谁、北京时间几点、调用什么 API、涉及什么资源、提交什么参数以及请求结果。普通查看忽略，Secrets Manager 查看保留；新增、删除、修改、登录及其他操作分别列出。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
+PDF 仅展示本账号的新增、修改、删除、Secrets Manager 查看、登录、其他操作的总数，以及事件合计、失败次数、实际统计窗口和查询状态。每账号一页，不展示逐事件执行信息或按操作者表。
+
+网页与 JSON 保留详细操作：谁、北京时间几点、调用什么 API、涉及什么资源、提交什么参数以及请求结果，并补充已识别操作的中文说明和 AWS 官方 API 文档链接。普通查看忽略，Secrets Manager 查看保留。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
 
 ## 已确认的部署配置
 
@@ -108,7 +110,7 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 ```
 
 - `SMTP_USERNAME` 同时为发件邮箱与登录账号；465 使用 `ssl`，587 通常使用 `starttls`。只支持验证证书的 TLS。邮箱参数沿用 RDS 字段名称，可从自己的 RDS 私有配置中复制 SMTP/MAIL 字段；无需将真实配置发给我。
-- `MAIL_RECIPIENTS` 至少一个地址，`MAIL_CC` 可为空；会对 To/CC 去重。邮件正文先给出各账号增删改数量，再附完整 PDF。
+- `MAIL_RECIPIENTS` 至少一个地址，`MAIL_CC` 可为空；会对 To/CC 去重。邮件正文先给出各账号增删改数量，再附单页统计 PDF。
 - 使用原 root profile `audit` 时保留 `AWS_PROFILE: "audit"`，Key 留空。使用单独 Key 时 `AWS_PROFILE` 留空，成对填写 ID/Secret；临时凭据还需 Token。均留空时使用默认凭据链/实例角色。每个启用账号先通过 STS 核对归属，错配账号不继续读取 CloudTrail。
 - `REGIONS: "all"` 扫描本账号已启用区域，标准 AWS 分区另纳入 `us-east-1` 以覆盖全局事件；也可填写区域数组。单个账号失败不阻止其他账号，失败账号 PDF 明确标记不完整，邮件标题也带不完整标记，不把失败当成零操作。
 - 开启异常群时填真实 `LARK_WEBHOOK_URL` 并设置 `LARK_ALERTS_ENABLED: true`，签名校验开启时同时填写 `LARK_SIGNING_SECRET`。原 `lark-config.json` 可供你复制地址和签名；新定时任务只读取统一 JSON，不发送正常 Lark 日报。单次发现失败即告警，同一轮报告的同类异常一小时内抑制重复；只在任务实际执行时检查，不另加分钟级重试定时器。
@@ -198,11 +200,25 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
 后文保留单账号 CLI、IAM 和可选手动 Lark 功能，供兼容已有手工命令使用；新定时部署使用上面的多账号邮件入口。
 
 
+## 操作识别与“其他操作”
+
+`audit_actions.py` 包含按服务和 API 精确匹配的审核规则，补充旧版仅靠名称前缀遗漏的操作，例如 EC2 监控开关与 Spot 请求、RDS 故障/主备切换、IAM MFA、KMS 授权与计划删除、CloudFormation 回滚、Secrets Manager 复制和 Organizations 账号移动。增删改是依据 API 功能做的报告归类，不是 AWS 官方另行提供的 CRUD 标签；请求未报错也不证明异步任务已完成。
+
+已经确认的实际问题：IAM `ListOrganizationsFeatures` 是**查看组织集中 root 访问功能**，`ServiceAccessNotEnabledException` 表示 Organizations 尚未启用 IAM 受信访问。它是普通查询，旧版在失败事件携带非只读标记时误入“其他操作”。新版按已核对的服务/API 精确识别并忽略该普通查询，包括失败请求；不会把所有名称带 Get/List 的未知非只读调用一概丢弃。[AWS 官方 API 说明](https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListOrganizationsFeatures.html)
+
+CloudTrail `readOnly=true` 的普通读取仍忽略，Secrets Manager 查看保留。`GetSessionToken`、`GetFederationToken` 和 `AssumeRoot` 等 STS 临时凭据请求以“身份会话”标记归入登录信息；网页明确区分临时凭据请求与控制台登录，不把它们写成自然人登录成功。[IAM / STS CloudTrail 说明](https://docs.aws.amazon.com/IAM/latest/UserGuide/cloudtrail-integration.html)
+
+KMS 加密、解密或签名是使用密钥的操作，不能认定为修改密钥配置；若作为非只读事件进入范围，会保留在“其他操作”并显示明确功能。仍无法确认的 API 保留原服务/API 和已有参数，不能为了减少“其他操作”数量而强行归入增删改。[CloudTrail 事件字段](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html)
+
+对于本机已安装 SDK 中可识别的服务 API，新版还会离线读取 botocore 的公开模型说明，在网页和 JSON 附上英文功能摘要和官方 API 链接；不连接 AWS、不读取凭据、不增加 API 权限或查询请求。仅凭 IAM 的 Write 权限标签无法区分新增/删除/修改，也不能将权限动作当作一定存在的 CloudTrail API 事件。[AWS 服务参考说明](https://docs.aws.amazon.com/service-authorization/latest/reference/service-reference.html)
+
+失败次数是分类事件的子集，不再额外加到总数中；各类别统计包含失败请求。PDF 改版不会清空邮件回执或重置当日自动邮件额度，已发送日期不会因改版自动再发一封。
+
 ## 报告能说明什么
 
 例如，日志中存在 `hhjgx` 调用 `ModifyInstanceAttribute` 的事件时，报告会显示操作时间、实例 ID、提交的属性参数、API 名称及调用是否报错。HTML 只保留标题、账号、生成时间、分类卡片、按操作者汇总、搜索和分类明细；明细使用“北京时间”和“操作信息”列名，时间不附 IANA 时区或偏移值。HTML 不展示来源横幅、查询窗口、区域概要、覆盖状态或技术说明；相关元数据、范围与警告保留在 JSON 和终端输出中。本版本不输出 CSV。
 
-登录信息仅归入能识别的登录事件，例如 `ConsoleLogin`、`CheckMfa`、`GetSigninToken`；`ConsoleLogin` 明确显示中文登录操作及成功或失败结果。不能识别为增删改的非登录写操作保留在“其他操作”，不会归入登录。登录信息和其他操作分类仅在实际存在对应事件时显示。
+登录信息仅归入能识别的登录事件，例如 `ConsoleLogin`、`CheckMfa`、`GetSigninToken`；`ConsoleLogin` 明确显示中文登录操作及成功或失败结果。不能识别为增删改的非登录写操作保留在“其他操作”；STS 身份会话请求按前文说明另行识别。登录信息和其他操作分类仅在实际存在对应事件时显示。
 
 需要区分以下事实：
 

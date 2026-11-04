@@ -26,7 +26,7 @@ DELETE_PREFIXES = ("Delete", "Remove", "Revoke", "Detach", "Disassociate", "Dere
 MODIFY_PREFIXES = ("Update", "Modify", "Put", "Set", "Enable", "Disable", "Start", "Stop", "Reboot", "Reset", "Restore", "Rotate", "Tag", "Untag", "Cancel", "Apply", "Accept", "Reject", "Replace", "Change", "Renew", "Confirm", "Promote", "Revoke", "Execute", "Send", "Invoke", "Publish", "Deploy")
 EXACT_CATEGORIES = {"RunInstances": "新增", "RunTask": "新增", "RunJobFlow": "新增"}
 RESOURCE_KEYS = {"secretid", "secretidlist", "instanceid", "instanceids", "groupid", "groupname", "username", "rolename", "policyarn", "functionname", "bucketname", "tablename", "dbinstanceidentifier", "dbclusteridentifier", "loadbalancerarn", "resourcearn", "resourceid", "trailname", "keyid", "loggroupname", "name"}
-SENSITIVE_KEYS = {"secretstring", "secretbinary", "secretaccesskey", "accesskeyid", "sessiontoken", "securitytoken", "password", "plaintext", "privatekey", "authorization", "apikey", "userdata", "accesstoken", "refreshtoken", "clientsecret", "keymaterial", "credentials", "credential", "secret", "token", "tokenvalue", "binarysecret"}
+SENSITIVE_KEYS = {"secretstring", "secretbinary", "secretaccesskey", "accesskeyid", "sessiontoken", "securitytoken", "password", "plaintext", "privatekey", "authorization", "apikey", "userdata", "accesstoken", "refreshtoken", "clientsecret", "keymaterial", "credentials", "credential", "secret", "token", "tokenvalue", "binarysecret", "samlassertion", "webidentitytoken", "tokencode", "clientassertion", "codeverifier", "subjecttoken", "identitytoken"}
 ACTION_TEXT = {
     "ModifyInstanceAttribute": "修改 EC2 实例属性", "RunInstances": "创建 EC2 实例",
     "TerminateInstances": "终止 EC2 实例", "StopInstances": "停止 EC2 实例", "StartInstances": "启动 EC2 实例",
@@ -187,6 +187,17 @@ def classify_event(event):
         read_only = {"true": True, "false": False}.get(read_only.lower())
     if read_only is True:
         return ("Secrets Manager 查看", "CloudTrail readOnly=true") if is_secrets(event) else (None, "忽略普通只读")
+    from audit_actions import lookup_action
+    action = lookup_action(event)
+    if action:
+        basis = "按服务和 API 对应的 AWS 功能说明归类"
+        if action["kind"] == "credential_session":
+            basis += "；身份会话/临时凭据请求，不代表控制台登录或资源配置变更"
+        elif action["kind"] == "ordinary_read":
+            basis += "；已核对为普通查看，忽略失败请求可能携带的非只读标记"
+        elif action["kind"] == "resource_use":
+            basis += "；服务能力调用，不认定为资源增删改"
+        return action["category"], basis
     confirmed_write = read_only is False or event.get("_matched_write_query") is True
     if not confirmed_write and name.startswith(READ_PREFIXES):
         return ("Secrets Manager 查看", "readOnly 缺失，按 API 名称推断") if is_secrets(event) else (None, "readOnly 缺失，按 API 名称忽略只读")
@@ -301,6 +312,7 @@ def parameter_summary(parameters):
 
 
 def normalize_event(event, lookup, zone):
+    from audit_actions import lookup_action, describe_operation
     category, basis = classify_event(event)
     actor, identity = actor_info(event, lookup)
     occurred = parse_time(event.get("eventTime") or lookup.get("EventTime"))
@@ -308,12 +320,19 @@ def normalize_event(event, lookup, zone):
     partial = has_response_failure(event.get("responseElements"))
     result = "失败" if failed else "响应包含失败（可能部分失败）" if partial else "请求无报错"
     name = event.get("eventName", lookup.get("EventName", "未知 API"))
-    description = ACTION_TEXT.get(name, ("调用 " + name))
+    action = lookup_action(event)
+    operation = describe_operation(event) if category is not None else {}
+    description = action["description"] if action else ACTION_TEXT.get(name, ("调用 " + name))
     parameters = redact(event.get("requestParameters"))
     summary = parameter_summary(parameters)
     resources = resource_names(event, lookup)
     login_details = None
-    if category == "登录信息":
+    if category == "登录信息" and action and action["kind"] == "credential_session":
+        result = "临时凭据请求失败" if failed or partial else "临时凭据请求无报错"
+        summary = description + "；身份会话请求，不代表控制台登录"
+        login_details = {"kind": "credential_session", "result": result,
+                         "note": "临时凭据或身份会话请求，不代表控制台登录成功"}
+    elif category == "登录信息":
         response = event.get("responseElements") or {}
         status = str(response.get(name, "")).lower() if isinstance(response, dict) else ""
         statuses = {
@@ -340,6 +359,9 @@ def normalize_event(event, lookup, zone):
             "account_id": event.get("recipientAccountId", ""), "region": event.get("awsRegion") or event.get("_query_region", ""),
             "source": event.get("eventSource", ""), "event_name": name, "category": category,
             "classification_basis": basis, "description": description, "resources": resources,
+            "operation_kind": action["kind"] if action else "resource_change" if category in {"新增", "修改", "删除"} else "other",
+            "api_description": operation.get("api_description", ""),
+            "operation_reference": action["reference"] if action else operation.get("operation_reference", ""),
             "parameters": parameters, "parameter_summary": summary, "login_details": login_details,
             "response": redact(event.get("responseElements")),
             "result": result, "failed": failed or partial, "error_code": event.get("errorCode", ""),
@@ -507,13 +529,18 @@ def render_html(report):
                 continue
             details = {"身份": row["identity"], "请求参数": row["parameters"],
                        "响应字段（脱敏）": row["response"], "错误码": row["error_code"], "错误信息": row["error_message"],
-                       "UserAgent": row["user_agent"]}
+                       "UserAgent": row["user_agent"], "分类依据": row["classification_basis"]}
+            if row.get("api_description"):
+                details["AWS API 说明"] = row["api_description"]
             if row.get("login_details"):
                 details["登录信息"] = row["login_details"]
             resources = "<br>".join(esc(x) for x in row["resources"])
+            reference = row.get("operation_reference", "")
+            api_link = (f'<br><a href="{esc(reference)}" target="_blank" rel="noopener noreferrer">AWS 官方 API 说明</a>'
+                        if reference.startswith("https://docs.aws.amazon.com/") else "")
             css = "failed" if row["failed"] else ""
             event_rows.append(f'<tr class="event {css}"><td>{esc(beijing(row.get("time_utc") or row["time_local"]))}</td><td>{esc(row["actor"])}<br><small>{esc(row["identity"]["type"])}</small></td>'
-                              f'<td><b>{esc(row["description"])}</b><br><code>{esc(row["event_name"])}</code><br>{esc(row["parameter_summary"])}<br><small>{esc(row["source"])}</small></td>'
+                              f'<td><b>{esc(row["description"])}</b><br><code>{esc(row["event_name"])}</code><br>{esc(row["parameter_summary"])}<br><small>{esc(row["source"])}</small>{api_link}</td>'
                               f'<td>{resources}<br><small>{esc(row["region"])} / {esc(row["source_ip"])}</small></td>'
                               f'<td>{esc(row["result"])}</td><td><details><summary>查看操作参数和身份</summary><pre>{pretty(details)}</pre></details><small>EventID: {esc(row["event_id"])}</small></td></tr>')
         body = "".join(event_rows) or '<tr><td colspan="6">无记录</td></tr>'

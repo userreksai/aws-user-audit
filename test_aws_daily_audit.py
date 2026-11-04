@@ -120,6 +120,68 @@ class ResolvedWindowTests(unittest.TestCase):
 
 
 class ClassificationTests(unittest.TestCase):
+    def test_known_iam_query_is_ignored_even_if_failed_event_claims_non_readonly(self):
+        for read_only in (False, "false", True, None):
+            event = sample_event(eventSource="iam.amazonaws.com", eventName="ListOrganizationsFeatures",
+                                 readOnly=read_only, errorCode="ServiceAccessNotEnabledException")
+            event["_matched_write_query"] = True
+            with self.subTest(read_only=read_only):
+                self.assertIsNone(audit.classify_event(event)[0])
+
+    def test_iam_query_does_not_override_other_services_unknown_write(self):
+        category, _ = audit.classify_event(sample_event(eventSource="unrelated.amazonaws.com",
+                                                       eventName="ListOrganizationsFeatures", readOnly=False))
+        self.assertEqual(category, "其他操作")
+
+    def test_service_specific_mutations_and_credential_sessions_are_identified(self):
+        for source, name, expected in (("ec2", "MonitorInstances", "修改"),
+                                       ("ec2", "RequestSpotInstances", "新增"),
+                                       ("rds", "FailoverDBCluster", "修改"),
+                                       ("kms", "ScheduleKeyDeletion", "删除"),
+                                       ("sts", "GetSessionToken", "登录信息")):
+            with self.subTest(name=name):
+                event = sample_event(eventSource=source+".amazonaws.com", eventName=name, readOnly=False)
+                row = audit.normalize_event(event, {}, ZoneInfo("Asia/Shanghai"))
+                self.assertEqual(row["category"], expected)
+                self.assertTrue(row["operation_reference"].startswith("https://docs.aws.amazon.com/"))
+                self.assertNotEqual(row["description"], "调用 " + name)
+
+    def test_temporary_credentials_are_not_labeled_successful_console_login_and_mfa_is_redacted(self):
+        event = sample_event(eventSource="sts.amazonaws.com", eventName="GetSessionToken", readOnly=False,
+                             requestParameters={"tokenCode": "TEST_MFA_CODE", "webIdentityToken": "TEST_OIDC_TOKEN"},
+                             responseElements={"credentials": {"sessionToken": "TEST_SECRET_SESSION"}})
+        row = audit.normalize_event(event, {}, ZoneInfo("Asia/Shanghai"))
+        self.assertEqual(row["result"], "临时凭据请求无报错")
+        self.assertEqual(row["login_details"]["kind"], "credential_session")
+        self.assertNotIn("登录成功", row["result"])
+        content = json.dumps(row)
+        for value in ("TEST_MFA_CODE", "TEST_OIDC_TOKEN", "TEST_SECRET_SESSION"):
+            self.assertNotIn(value, content)
+
+    def test_report_removes_only_two_failed_ordinary_queries_and_preserves_other_failures(self):
+        events = []
+        for index in range(12):
+            event = sample_event(eventID=f"modify-{index}")
+            if index < 2:
+                event["errorCode"] = "AccessDenied"
+            events.append(event)
+        for index in range(22):
+            events.append(sample_event(eventID=f"secret-{index}", eventSource="secretsmanager.amazonaws.com",
+                                       eventName="GetSecretValue", readOnly=True))
+        for index in range(3):
+            events.append(sample_event(eventID=f"login-{index}", eventSource="signin.amazonaws.com",
+                                       eventName="ConsoleLogin", responseElements={"ConsoleLogin": "Failure" if index == 0 else "Success"}))
+        for index in range(2):
+            events.append(sample_event(eventID=f"ordinary-{index}", eventSource="iam.amazonaws.com",
+                                       eventName="ListOrganizationsFeatures", readOnly=False,
+                                       errorCode="ServiceAccessNotEnabledException", requestParameters=None))
+        result = report_for(events)
+        self.assertEqual(result["metadata"]["input_records"], 39)
+        self.assertEqual(result["metadata"]["total"], 37)
+        self.assertEqual(result["metadata"]["counts"]["其他操作"], 0)
+        self.assertEqual(result["metadata"]["ignored_read_events"], 2)
+        self.assertEqual(result["metadata"]["failed_or_partial"], 3)
+
     def test_ordinary_reads_ignored(self):
         category, _ = audit.classify_event(sample_event(
             eventName="DescribeInstances", readOnly=True
