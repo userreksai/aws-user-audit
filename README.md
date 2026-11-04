@@ -1,10 +1,10 @@
 # AWS 多账号操作审计：PDF 邮件日报
 
-按 AWS 账号读取 CloudTrail 管理事件，每个 AWS 账号生成一份按 IAM 用户 / 角色逐行统计的中文 PDF，所有启用账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成、发布或邮件投递失败时通知群。
+按 AWS 账号读取 CloudTrail 管理事件，每个启用账号生成一份按 IAM 用户 / 角色逐行统计的中文 PDF，所有账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成或邮件投递失败时通知群。
 
 PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行，列出身份类型、新增、修改、删除、Secrets Manager 查看、登录、其他、失败及合计，最后显示 AWS 账号合计。另有 **用户操作与事件汇总**，按“用户 / 角色 + 服务 API”合并调用，显示中文事件、调用次数和失败次数。PDF 不展示逐次执行记录、参数、资源、来源 IP 或每次执行时间。表格较长时自动分页并重复表头，不截掉用户或事件。
 
-网页与 JSON 保留详细操作：谁、北京时间几点、调用什么 API、涉及什么资源、提交什么参数以及请求结果，并补充已识别操作的中文说明和 AWS 官方 API 文档链接。普通查看忽略，Secrets Manager 查看保留。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
+多账号日报只生成 **PDF 和私有 `report.json`**。JSON 保留操作时间、身份、API、资源、提交参数和请求结果，供本地复核；PDF 只含统计。普通查看忽略，Secrets Manager 查看保留。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
 
 ## 已确认的部署配置
 
@@ -14,17 +14,12 @@ PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行
 | Python 虚拟环境 | `/usr/local/aws-user-audit/.venv` |
 | 统一私有 JSONC | `/usr/local/aws-user-audit/aws-audit-config.json` |
 | 归档 | `/usr/local/aws-user-audit/reports/<账号ID>/<报表结束日期>/` |
-| 网页 | `/usr/local/aws-user-audit/index/index.html` 为多账号总览；点击账号进入明细 |
-| 单账号网页 | `/usr/local/aws-user-audit/index/<账号ID>/index.html` |
-| 邮件状态 | `/usr/local/aws-user-audit/.state/`，不放进网页目录 |
-| Nginx 配置 | `/etc/nginx/conf.d/zybocedata-pass.v668live.com.conf` |
-| 网站入口 | `8889`、`/audit/`，详情链接 https://zybocedata-pass.v668live.com/audit/ |
-| 原前端 / RDS 路由 | `/` → `127.0.0.1:8890` 和 `/audit_rds/` 原文保留 |
+| 邮件状态 | `/usr/local/aws-user-audit/.state/`，仅任务用户可访问 |
 | 每日执行 | **北京时间 10:05**（`DAILY_MAIL_TIME`），不依赖服务器系统时区 |
 | 查询窗口 | **昨日 10:00 ≤ 事件时间 < 今日 10:00**，24 小时，相邻日报不重叠 |
 | 停机恢复 | 只补最近一份已结束的日报；配置的统计结束时刻之前恢复，选择前一结束日 |
 
-网页密码已取消。**安装/更新只配置服务与定时器，不查询 AWS，不发送邮件或 Lark。** 没有成功执行过报告时网页目录为空是正常现象。
+**安装/更新只部署代码、模板、服务与定时器，不立即查询 AWS 或发送通知。** 每日任务不生成 HTML、CSS、JS 或 `index/`，邮件不含网页链接。Nginx 已从安装流程移除，现有 Nginx 文件原样保留；旧服务器的 `/audit`、`/audit/` 由使用者手动清理，保留原前端和 RDS 路由。
 
 ## 安装和更新
 
@@ -44,7 +39,7 @@ cd /opt/aws-user-audit-src
 sudo bash install.sh
 ```
 
-`/opt/aws-user-audit-src` 是源码目录，实际运行目录是 `/usr/local/aws-user-audit`。安装器首次会创建权限 `0600` 的私有配置模板，然后停止；填写配置后重跑安装。不要将真实 Key、授权码或机器人 Webhook 提交到 GitHub。
+`/opt/aws-user-audit-src` 是源码目录，实际运行目录是 `/usr/local/aws-user-audit`。缺少 `aws-audit-config.json` 时，先以完整模板初始化私有配置，权限 `0600`，然后提示填写后重跑；此阶段不替换运行代码或服务。配置通过后，再部署所有必需运行文件和配置模板。**已有私有配置文件按字节保留，不覆盖、不补字段、不改 TAG 或凭据。** 新增字段由使用者手动填写。不要将真实 Key、授权码或机器人 Webhook 提交到 GitHub。
 
 ```bash
 sudo nano /usr/local/aws-user-audit/aws-audit-config.json
@@ -64,9 +59,7 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 
 `systemctl cat` 中 Python、工作目录和配置文件都应指向新目录。旧 `/usr/local/shenji` 的历史文件保留，不自动删除或搬迁；系统定时器改为新路径。自行维护的旧 cron 若仍存在，安装器会停止并提示，避免重复运行。
 
-安装器只在指定 Nginx 文件中唯一匹配域名和 `listen 8889` 的 server 内修改 `/audit` 和 `/audit/`，alias 更新为新目录的 `index/`。原前端及 `/audit_rds`、`/audit_rds/` 保持原文；未知路由或匹配不唯一时停止。先备份、`nginx -t`，通过后仅 reload；失败恢复，不 stop/restart。安装失败恢复原任务状态；pip 依赖安装不具备完整回滚。
-
-新路径不应与 RDS 项目共用。原有网页密码服务在静态页面切换成功后停用。报告使用同源外部 CSS/JS，适配原 `style-src 'self'` CSP。
+安装流程仅管理审计服务与定时器，不需要 Nginx、网站路径或域名。旧 `--nginx-config`、`--publish-dir` 等网页选项仅接受并提示忽略，便于沿用安装命令。安装失败恢复原代码、服务单元和定时器状态；pip 依赖安装不具备完整回滚。新路径不应与 RDS 项目共用。
 
 ## 私有配置填写
 
@@ -75,7 +68,6 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 ```json
 {
   "OUTPUT_DIRECTORY": "reports",
-  "PUBLISH_DIRECTORY": "index",
   "STATE_DIRECTORY": ".state",
   "TIMEZONE": "Asia/Shanghai",
   "DAILY_MAIL_TIME": "10:05",
@@ -96,7 +88,8 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
   "LARK_SIGNING_SECRET": "",
   "ACCOUNTS": [
     {
-      "NAME": "production",
+      "TAG": "prod-支付",
+      "NAME": "123456789012",
       "ACCOUNT_ID": "123456789012",
       "ENABLED": true,
       "AWS_PROFILE": "audit",
@@ -110,11 +103,12 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 ```
 
 - `SMTP_USERNAME` 同时为发件邮箱与登录账号；465 使用 `ssl`，587 通常使用 `starttls`。只支持验证证书的 TLS。邮箱参数沿用 RDS 字段名称，可从自己的 RDS 私有配置中复制 SMTP/MAIL 字段；无需将真实配置发给我。
-- `MAIL_RECIPIENTS` 至少一个地址，`MAIL_CC` 可为空；会对 To/CC 去重。邮件正文先给出各 AWS 账号增删改数量，再附 IAM 用户 / 角色统计 PDF。
+- `MAIL_RECIPIENTS` 至少一个地址，`MAIL_CC` 可为空；会对 To/CC 去重。邮件只写一次问候、查询范围和整体查询状态，然后列出实际账号总数及 `TAG-ACCOUNT_ID`。启用 3 个账号就附 3 份 PDF，启用 7 个就附 7 份；暂停的账号不计入正文和附件。
+- `ACCOUNTS[*].TAG` 是可选账号标签，例如 `prod-支付`、`uat-预生产`、`dev-测试`，支持中文、最多 120 字符。旧配置没有 TAG 时正常运行并只显示账号 ID；手动加入后，下次运行生效。`NAME` 的目录短名规则和 `ACCOUNT_ID` 的 12 位校验保持不变，TAG 不用于路径或凭据选择。
 - 使用原 root profile `audit` 时保留 `AWS_PROFILE: "audit"`，Key 留空。使用单独 Key 时 `AWS_PROFILE` 留空，成对填写 ID/Secret；临时凭据还需 Token。均留空时使用默认凭据链/实例角色。每个启用账号先通过 STS 核对归属，错配账号不继续读取 CloudTrail。
 - `REGIONS: "all"` 扫描本账号已启用区域，标准 AWS 分区另纳入 `us-east-1` 以覆盖全局事件；也可填写区域数组。单个账号失败不阻止其他账号，失败账号 PDF 明确标记不完整，邮件标题也带不完整标记，不把失败当成零操作。
 - 开启异常群时填真实 `LARK_WEBHOOK_URL` 并设置 `LARK_ALERTS_ENABLED: true`，签名校验开启时同时填写 `LARK_SIGNING_SECRET`。原 `lark-config.json` 可供你复制地址和签名；新定时任务只读取统一 JSON，不发送正常 Lark 日报。单次发现失败即告警，同一轮报告的同类异常一小时内抑制重复；只在任务实际执行时检查，不另加分钟级重试定时器。
-- 相对目录均以配置文件所在目录计算。`PUBLISH_DIRECTORY` 须与安装器 Nginx alias 目录一致，默认 `index`；自定义时同时传 `install.sh --publish-dir`。
+- 相对目录均以配置文件所在目录计算。新模板取消 `PUBLISH_DIRECTORY`、`REPORT_URL`；已有配置中保留这些旧字段也可运行，程序忽略它们。
 - `PDF_FONT_PATH` 可选中文 TTF/TTC；Linux 可安装 `fonts-wqy-zenhei` 提高跨设备显示一致性。留空时自动寻找字体，否则使用中文 CID 字体。
 - `DAILY_MAIL_TIME` 控制每天启动采集和生成报告的北京时间，默认 `10:05`；邮件在采集和 PDF 完成后发送，不保证 10:05 整到达邮箱。
 - `REPORT_START_TIME` 是统计开始时刻（报表结束日的前一天），`REPORT_END_TIME` 是统计结束时刻（报表结束日），默认均为 `10:00`，即 24 小时。开始和结束都包含日期，采用左闭右开，报表日期是结束日。`DAILY_MAIL_TIME` 不能早于 `REPORT_END_TIME`。
@@ -129,6 +123,22 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
 ```
 
 安装的预检另检查本地 profile 是否存在，不请求 AWS 凭据，也不能证明远端权限或 SMTP 授权有效。
+
+邮件正文示例（3 个启用账号，对应 3 份独立 PDF）：
+
+```text
+各位领导和同事好：
+AWS 账号操作审计日报
+查询范围（北京时间，结束时刻不含）：
+2026-11-03 10:00:00 至 2026-11-04 10:00:00
+查询状态：所列查询完成。
+PDF 附件按 IAM 用户 / 角色汇总增删改查及中文事件的调用次数和失败次数。
+账号总数：3
+账号信息：
+prod-支付-796973492024
+uat-预生产-796973492025
+dev-测试-796973492026
+```
 
 ## 修改日报时间
 
@@ -157,10 +167,10 @@ systemctl list-timers --all aws-user-audit.timer
 ```bash
 sudo systemctl start aws-user-audit.service
 sudo journalctl -u aws-user-audit.service -n 100 --no-pager
-ls -lh /usr/local/aws-user-audit/index/
+ls -lh /usr/local/aws-user-audit/reports/
 ```
 
-手动指定报表结束日；不加 `--send-mail` 仅采集并生成 PDF/HTML，默认也更新网页：
+手动指定报表结束日；不加 `--send-mail` 仅采集并生成 PDF 和私有 JSON：
 
 ```bash
 sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_audit_multi.py   --config /usr/local/aws-user-audit/aws-audit-config.json --date 2026-11-04
@@ -172,7 +182,7 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
 sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_audit_multi.py   --config /usr/local/aws-user-audit/aws-audit-config.json --date 2026-11-04 --send-mail
 ```
 
-同一份已接受或投递不确定的报告不会直接重复发；核实邮箱后确需重发时，手动命令再加 `--force-resend`。不要删除 `.state/mail-delivery.json` 来重置额度。自动邮件按**发送当天北京时间**最多一封，账号、收件人、数据或完整度改变不触发第二封。后续重跑仍更新本地报告与网页。`AUTO_MAIL_MAX_PER_DAY: 0` 关闭自动邮件，仍生成本地报告。
+同一份已接受或投递不确定的报告不会直接重复发；核实邮箱后确需重发时，手动命令再加 `--force-resend`。不要删除 `.state/mail-delivery.json` 来重置额度。自动邮件按**发送当天北京时间**最多一封，账号、标签、收件人、数据或完整度改变不触发第二封。后续重跑仍更新本地报告。`AUTO_MAIL_MAX_PER_DAY: 0` 关闭自动邮件，仍生成本地报告。
 
 提交 SMTP 前先落盘 `sending`；进程中断、部分拒收、提交中断或损坏状态保守视为投递不确定，停止自动重发。明确认证/连接失败不消耗成功额度，等下次实际运行再试；此项目没有“15 分钟后自动重试”机制。SMTP 接受只代表服务器接受，不保证最终进入收件箱。
 
@@ -181,23 +191,13 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
 ```text
 /usr/local/aws-user-audit/
   reports/123456789012/2026-11-04/
-    2026-11-04-aws操作审计.html
     123456789012-2026-11-04-aws操作审计.pdf
     report.json
-    audit-report.css
-    audit-report.js
-  index/
-    index.html
-    audit-report.css
-    audit-report.js
-    123456789012/index.html
   .state/
     mail-delivery.json
 ```
 
-返回码：0 完成或按规则跳过邮件，1 启动/配置错误，2 查询不完整，3 通知失败或投递不确定，4 网页发布失败，5 报告/PDF 生成失败。网页失败仍可发送完整 PDF，邮件正文不会附指向旧网页的链接。
-
-后文保留单账号 CLI、IAM 和可选手动 Lark 功能，供兼容已有手工命令使用；新定时部署使用上面的多账号邮件入口。
+多账号入口返回码：0 完成或按规则跳过邮件，1 启动/配置错误，2 查询不完整，3 通知失败或投递不确定，5 报告/PDF 生成失败。旧 `--no-publish` 选项接受但无实际作用。
 
 
 ## PDF 的账号维度
@@ -226,17 +226,17 @@ PDF 只读取汇总白名单，校验各身份的分类数量、失败和合计�
 
 已经确认的实际问题：IAM `ListOrganizationsFeatures` 是**查看组织集中 root 访问功能**，`ServiceAccessNotEnabledException` 表示 Organizations 尚未启用 IAM 受信访问。它是普通查询，旧版在失败事件携带非只读标记时误入“其他操作”。新版按已核对的服务/API 精确识别并忽略该普通查询，包括失败请求；不会把所有名称带 Get/List 的未知非只读调用一概丢弃。[AWS 官方 API 说明](https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListOrganizationsFeatures.html)
 
-CloudTrail `readOnly=true` 的普通读取仍忽略，Secrets Manager 查看保留。`GetSessionToken`、`GetFederationToken` 和 `AssumeRoot` 等 STS 临时凭据请求以“身份会话”标记归入登录信息；网页明确区分临时凭据请求与控制台登录，不把它们写成自然人登录成功。[IAM / STS CloudTrail 说明](https://docs.aws.amazon.com/IAM/latest/UserGuide/cloudtrail-integration.html)
+CloudTrail `readOnly=true` 的普通读取仍忽略，Secrets Manager 查看保留。`GetSessionToken`、`GetFederationToken` 和 `AssumeRoot` 等 STS 临时凭据请求以“身份会话”标记归入登录信息；报告明确区分临时凭据请求与控制台登录，不把它们写成自然人登录成功。[IAM / STS CloudTrail 说明](https://docs.aws.amazon.com/IAM/latest/UserGuide/cloudtrail-integration.html)
 
 KMS 加密、解密或签名是使用密钥的操作，不能认定为修改密钥配置；若作为非只读事件进入范围，会保留在“其他操作”并显示明确功能。仍无法确认的 API 保留原服务/API 和已有参数，不能为了减少“其他操作”数量而强行归入增删改。[CloudTrail 事件字段](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html)
 
-对于本机已安装 SDK 中可识别的服务 API，新版还会离线读取 botocore 的公开模型说明，在网页和 JSON 附上英文功能摘要和官方 API 链接；不连接 AWS、不读取凭据、不增加 API 权限或查询请求。仅凭 IAM 的 Write 权限标签无法区分新增/删除/修改，也不能将权限动作当作一定存在的 CloudTrail API 事件。[AWS 服务参考说明](https://docs.aws.amazon.com/service-authorization/latest/reference/service-reference.html)
+对于本机已安装 SDK 中可识别的服务 API，新版还会离线读取 botocore 的公开模型说明，在 JSON 附上英文功能摘要和官方 API 链接；不连接 AWS、不读取凭据、不增加 API 权限或查询请求。仅凭 IAM 的 Write 权限标签无法区分新增/删除/修改，也不能将权限动作当作一定存在的 CloudTrail API 事件。[AWS 服务参考说明](https://docs.aws.amazon.com/service-authorization/latest/reference/service-reference.html)
 
 失败次数是分类事件的子集，不再额外加到总数中；各类别统计包含失败请求。PDF 改版不会清空邮件回执或重置当日自动邮件额度，已发送日期不会因改版自动再发一封。
 
 ## 报告能说明什么
 
-例如，日志中存在 `hhjgx` 调用 `ModifyInstanceAttribute` 的事件时，报告会显示操作时间、实例 ID、提交的属性参数、API 名称及调用是否报错。HTML 只保留标题、账号、生成时间、分类卡片、按操作者汇总、搜索和分类明细；明细使用“北京时间”和“操作信息”列名，时间不附 IANA 时区或偏移值。HTML 不展示来源横幅、查询窗口、区域概要、覆盖状态或技术说明；相关元数据、范围与警告保留在 JSON 和终端输出中。本版本不输出 CSV。
+例如，日志中存在 `hhjgx` 调用 `ModifyInstanceAttribute` 的事件时，PDF 汇总其“修改 EC2 实例属性”的调用及失败次数；具体操作时间、实例 ID、提交的属性参数、API 名称和请求结果保存在私有 JSON 中。范围与警告同样保留在 JSON 和终端输出中。本版本的多账号入口不生成 HTML 或 CSV。
 
 登录信息仅归入能识别的登录事件，例如 `ConsoleLogin`、`CheckMfa`、`GetSigninToken`；`ConsoleLogin` 明确显示中文登录操作及成功或失败结果。不能识别为增删改的非登录写操作保留在“其他操作”；STS 身份会话请求按前文说明另行识别。登录信息和其他操作分类仅在实际存在对应事件时显示。
 
@@ -359,160 +359,21 @@ aws --profile audit ec2 describe-regions --region eu-north-1 --query "Regions[].
 
 查询结果为空，只能说明查询当时没有匹配的可见记录；还需确认账号、日期、时区和区域是否正确。
 
-## 四、生成、发布并通知
+## 完整性与验证
 
-### 日期与窗口
+CloudTrail LookupEvents 仅覆盖最近 90 天的管理事件，不包含数据事件。任一区域查询或事件解析失败时，JSON、PDF、邮件主题和正文均标记不完整；相关问题按配置触发 Lark 异常告警。查询成功也可能遇到 CloudTrail 日志延迟，应结合任务日志复核。每次调用按 EventID 去重计数，不等于人工操作或资源数量。
 
-默认报表日期是北京时间今天。`--today`与默认相同；`--date YYYY-MM-DD`指定窗口结束日期，两者互斥。例如`--date 2026-10-28`固定查询2026-10-27 07:00至2026-10-28 08:00，共25小时。任何运行时间都不会将结束时间延伸到当前时刻。未结束窗口会拒绝。
+旧的单账号网页/机器人辅助代码保留以兼容历史用途；当前部署服务固定使用 `aws_audit_multi.py` 的 PDF 邮件流程。旧网页文件不被新任务更新，服务器现有 Nginx 配置由使用者自行清理。
 
-生成并推送总览：
-
-```bash
-.venv/bin/python aws_daily_audit.py --profile audit --send-lark --publish-dir /usr/local/aws-user-audit/index
-```
-
-只生成文件，不发送Lark时省略`--send-lark`。EC2角色方式省略`--profile audit`。Windows将Python路径替换成`.\.venv\Scripts\python.exe`。
-
-### 日期归档与网页副本
-
-文件保存为：
-
-```text
-reports/<AWS账号ID>/2026-10-28/2026-10-28-aws操作审计.html
-reports/<AWS账号ID>/2026-10-28/report.json
-/usr/local/aws-user-audit/index/index.html
-/usr/local/aws-user-audit/index/audit-report.css
-/usr/local/aws-user-audit/index/audit-report.js
-```
-
-Linux实际AWS查询默认发布到`/usr/local/aws-user-audit/index/index.html`，日期HTML和JSON仍保留。CSS和搜索JavaScript是同目录独立文件，兼容现有 `default-src 'self'; style-src 'self'` 策略。代码会先复制全部静态文件，再原子替换index.html；不将JSON发布到网页目录。缺少任一引用文件时停止发布，保留旧index.html。
-
-样式和脚本链接带内容版本参数，避免浏览器沿用旧缓存。查看下载的日期HTML时，需要同时保留同目录的 `audit-report.css` 和 `audit-report.js`。请勿只手动复制一个HTML文件；脚本的发布函数会自动复制三个文件。
-
-本地服务的静态文件也需能访问，并返回正确的MIME类型，尤其开启 `X-Content-Type-Options: nosniff` 时：
+本地离线回归不连接真实 AWS、SMTP 或 Lark：
 
 ```bash
-curl -sSI --max-time 10 http://127.0.0.1:9999/audit/audit-report.css
-curl -sSI --max-time 10 http://127.0.0.1:9999/audit/audit-report.js
+.venv/bin/python -m unittest -q test_aws_daily_audit test_audit_config test_audit_multi test_audit_mail test_audit_mail_delivery test_audit_pdf test_audit_identity_summary test_audit_event_catalog test_deployment test_install_script test_audit_schedule test_audit_alerts
+bash -n install.sh
+bash install.sh --dry-run
 ```
 
-CSS应返回200和`Content-Type: text/css`；JavaScript应返回200和JavaScript MIME类型（例如`text/javascript`或`application/javascript`）。如果返回404或text/html，需要检查现有Web服务对该目录下静态文件的映射。无需放宽CSP或增加unsafe-inline。域名访问问题与本机9999端口服务是不同的连接链路，本次代码不修改DNS或反向代理。
-
-脚本执行用户需要对发布目录有写入权限，Web服务器需已将`/audit/`映射到该目录。代码不修改Web服务器配置。发布失败保留日期归档，返回4（若审计本身不完整，优先返回2），不发送Lark，以免链接指向旧报告。
-
-Windows和离线输入默认不更新网页；可显式使用`--publish-dir`。`--no-publish`禁止网页复制，与`--publish-dir`互斥。同一日期重跑覆盖归档及index.html；重新加`--send-lark`会再次通知。
-
-### Lark数量总览和详情链接
-
-只有显式添加`--send-lark`才会发送。顺序为：生成归档 → 更新index.html → 发送Lark总览。
-
-默认通知先显示新增、删除、修改数量，再显示Secrets Manager查看、登录及失败数量，最后附详细报告链接：
-
-[查看详细报告](https://zybocedata-pass.v668live.com/audit/)
-
-默认`--lark-mode overview`不包含逐条事件、参数或响应。临时需要最近8条可使用`--lark-mode summary`；全部脱敏明细分条发送使用`--lark-mode full`。full每条请求不超过20KB，并以0.7秒间隔节流；不是HTML附件。
-
-### Lark私有配置
-
-代码包只有`lark-config.example.json`模板。实际`lark-config.json`已被Git忽略，不进入代码包；保留自己的私有配置。模板中的Webhook是占位符，必须替换为目标群机器人的真实地址。
-
-```bash
-cp lark-config.example.json lark-config.json
-chmod 600 lark-config.json
-```
-
-已有私有配置不要执行复制覆盖。Windows复制命令为`Copy-Item lark-config.example.json lark-config.json`。
-
-| 配置项 | 说明 |
-| --- | --- |
-| `webhook_url` | 从目标群机器人设置复制的纯HTTPS地址 |
-| `signing_secret` | 开启签名校验时填写签名密钥 |
-| `message_mode` | 模板为overview；主脚本以--lark-mode为准 |
-| `report_url_template` | 模板已填写固定/audit/链接；主脚本以--report-url为准 |
-| `title_prefix` | 标题前缀；开启关键词校验时应包含允许的关键词 |
-
-环境变量`LARK_WEBHOOK_URL`、`LARK_SIGNING_SECRET`会覆盖文件。若机器人启用IP白名单，应放行服务器的公网出口IP。无需增加AWS IAM权限。
-
-### 参数
-
-| 参数 | 默认值 | 用途 |
-| --- | --- | --- |
-| `--profile` | 不指定 | boto3默认凭据链，外部服务器可填audit |
-| `--regions` | all | 所有已启用区域，或逗号分隔区域名 |
-| `--timezone` | Asia/Shanghai | 固定北京时间 |
-| `--date` | 北京时间今天 | 25小时窗口结束日期 |
-| `--today` | 与默认相同 | 今天为窗口结束日期 |
-| `--output-dir` | reports | 日期归档根目录 |
-| `--publish-dir` | Linux实际查询为/usr/local/aws-user-audit/index | 复制HTML为index.html |
-| `--no-publish` | 不启用 | 不更新网页副本 |
-| `--send-lark` | 不启用 | 生成及发布后才推送 |
-| `--lark-config` | lark-config.json | 可指定配置文件绝对路径 |
-| `--lark-mode` | overview | 数量总览和链接，可选summary/full；覆盖配置文件 |
-| `--report-url` | https://zybocedata-pass.v668live.com/audit/ | 通知详情链接；覆盖配置文件 |
-| `--input-file` | 不指定 | 离线JSON输入，不访问AWS |
-
-### 离线测试
-
-```bash
-.venv/bin/python aws_daily_audit.py --input-file examples/sample-events.json --date 2026-10-28 --publish-dir preview-site
-```
-
-此命令生成虚构数据报告，并复制到项目下`preview-site/index.html`。不访问AWS，也不发Lark；离线默认不发布到线上目录。JSON保留示例来源，HTML没有来源横幅，请勿将示例当作生产报告。
-
-### 网页访问
-
-当前部署取消网页密码，使用文首 install.sh 流程。它将 /audit/ 恢复为 Nginx 静态页面，不使用 9998 认证服务；原前端 8890 转发保留。
-
-### Lark 错误 19001 与本地配置诊断
-
-`19001` 本身不能唯一确定原因，应结合错误细节定位。模块会将已知错误消息映射为安全的排障提示，不回显 Webhook token。如果提示 `incoming webhook access token invalid`，说明 Webhook/token 无效：请在目标群机器人的设置中重新复制当前 Webhook 地址并更新私有配置，同时检查机器人是否已被删除或重建、地址是否失效，以及配置中是否仍是 `REPLACE` 等示例占位内容。
-
-尤其注意 `LARK_WEBHOOK_URL` 环境变量会覆盖文件里的地址：即使文件已改对，运行用户或调度任务的环境变量仍可能指向旧机器人。`19001` 也可能对应消息请求参数错误，应依据模块提供的具体提示排查，不能仅凭错误码就认定签名或 Webhook 一定有误。机器人原有的签名、关键词及 IP 白名单要求仍需满足。
-
-本地排查步骤：
-
-1. 进入包含 `aws_daily_audit.py`、`lark_notify.py` 和私有配置的脚本目录。
-2. 只有希望使用配置文件里的地址时，才在当前终端执行 `unset LARK_WEBHOOK_URL`，避免环境变量继续覆盖文件。Windows PowerShell 对应执行 `Remove-Item Env:LARK_WEBHOOK_URL -ErrorAction SilentlyContinue`；希望继续使用环境变量时跳过这一步。
-3. 编辑 `lark-config.json`，将 `webhook_url` 填成从目标群机器人设置中复制的纯 HTTPS 地址。地址中不要带 Markdown 的 `[]()`、尖括号、空白、换行或额外的 `?` 查询参数，也不能保留 `REPLACE` 等占位内容。
-4. 执行本地诊断：
-
-```bash
-.venv/bin/python -m lark_notify --config lark-config.json --check-config
-```
-
-Windows 将 Python 路径替换成 `.\.venv\Scripts\python.exe`。新版诊断会在校验前输出实际配置文件的绝对路径和生效来源，校验失败时同样保留这些信息，并给出具体失败原因；可安全显示目标主机及环境变量是否覆盖文件，不回显 token。该命令没有外网请求，也不发送消息，因此不能验证远端 token 是否仍有效。需要实际推送时，使用上面的主脚本 `--send-lark` 命令。
-
-## 五、旧单账号脚本的固定08:01定时示例（新部署使用前文配置）
-
-请使用文首的 install.sh 和 aws-user-audit.timer，不要另加 cron，以免重复采集和通知。安装不立即推送，后续停机恢复补跑最近一份已结束日报。
-
-## 六、完整性、错误和数据边界
-
-退出码：0=生成、所请求查询和已启用的发布/推送均完成；1=启动/参数/凭据/输入输出错误；2=审计查询或解析不完整（优先于发布/推送失败）；3=报告已生成但Lark失败；4=网页副本发布失败且本次未发Lark。文件会在后续发布或推送失败时保留。参数解析错误也可能由argparse返回2但不生成报告，应结合终端输出判断。0不代表没有风险操作。
-
-- 每个区域分别查询 `ReadOnly=false` 与 `EventSource=secretsmanager.amazonaws.com`，完整翻页，按事件 ID 去重；遵守 LookupEvents 每账号每区域每秒两次请求的限制，并重试暂时性失败。普通只读事件不进入日报，Secrets Manager 读取单独保留。
-- 任一区域查询或事件解析失败，JSON 会标记 **不完整** 并记录失败范围，终端输出会提示异常，退出码为 `2`。HTML 不展示查询状态和覆盖范围，因此应结合 JSON、终端和退出码检查完整性，不能仅凭 HTML 判断“全天无异常”。调度器应监控非零退出码和 JSON 完整性。
-- Event history 仅包含最近 90 天管理事件，不要求事先建立 Trail；不含 S3 对象写入/删除、Lambda 调用等数据事件，也不能汇总组织其他账号。若需要这些事件或超过 90 天留存，应另外配置 Trail / CloudTrail Lake 及对应采集方案。
-- 普通写入覆盖以 AWS 返回的 `ReadOnly=false` 管理事件为准。AWS 缺失/异常分类、未被 CloudTrail 记录的操作以及日志延迟均可能影响覆盖；无法通过脚本补造不存在的事件。
-- 自动发现只扫描当前分区内当前已启用的区域。手工限定区域、区域权限限制、已关闭区域或其他分区的历史活动不在完整覆盖承诺中。
-- 来源身份为 AWS 服务或角色时，报告仍保留；需要判断是否对应某个人，应结合组织的角色会话规范或身份系统映射，不根据名称猜测。
-- 两类查询存在重叠，会按事件 ID 消除同一事件的重复；批量 Secret 读取可能同时产生批量调用事件与每个 Secret 的读取事件，它们是不同审计记录，不应简单按时间和用户名合并。
-
-## 七、离线验证
-
-项目提供离线单元测试，其中包括使用官方 AWS SDK 的 `botocore.stub.Stubber` 按服务模型校验请求和模拟响应。测试及样例演示均在离线数据上验证，未连接实际 AWS 账号，不能代替部署后对账号权限与真实数据的验证。
-
-安装依赖后，在项目目录重新运行：
-
-```bash
-.venv/bin/python -m unittest -v
-```
-
-Windows 对应命令：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest -v
-```
+Linux CI 另验证完整安装/更新/回滚生命周期、配置文件字节保留、初始化模板、生成的 systemd 单元和北京时间日历；安装器无需 Nginx。
 
 ## 官方资料
 

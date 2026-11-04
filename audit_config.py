@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import unicodedata
 
 DEFAULT_INSTALL_DIR = "/usr/local/aws-user-audit"
-DEFAULT_REPORT_URL = "https://zybocedata-pass.v668live.com/audit/"
 
 
 def _text(value, name, *, required=False):
@@ -52,7 +52,6 @@ def load_config(path, *, require_mail=False):
         return str((source.parent / item).resolve() if not item.is_absolute() else item.resolve())
 
     result["OUTPUT_DIRECTORY"] = local_path("OUTPUT_DIRECTORY", "reports")
-    result["PUBLISH_DIRECTORY"] = local_path("PUBLISH_DIRECTORY", "index")
     result["STATE_DIRECTORY"] = local_path("STATE_DIRECTORY", ".state")
     font = _text(raw.get("PDF_FONT_PATH", ""), "PDF_FONT_PATH")
     result["PDF_FONT_PATH"] = local_path("PDF_FONT_PATH", font) if font else ""
@@ -72,12 +71,9 @@ def load_config(path, *, require_mail=False):
     result["AUTO_MAIL_MAX_PER_DAY"] = raw.get("AUTO_MAIL_MAX_PER_DAY", 1)
     if type(result["AUTO_MAIL_MAX_PER_DAY"]) is not int or result["AUTO_MAIL_MAX_PER_DAY"] not in (0, 1):
         raise ValueError("AUTO_MAIL_MAX_PER_DAY 仅支持 0 或 1")
-    result["REPORT_URL"] = _text(raw.get("REPORT_URL", DEFAULT_REPORT_URL), "REPORT_URL", required=True)
-    from lark_notify import _validate_report_url, validate_webhook_url
-    _validate_report_url(result["REPORT_URL"])
-    from urllib.parse import urlsplit
-    if urlsplit(result["REPORT_URL"]).scheme != "https":
-        raise ValueError("REPORT_URL 必须使用 HTTPS")
+    # Legacy web fields are accepted as inert compatibility data. Multi-account
+    # reporting no longer publishes HTML or needs a report URL.
+    from lark_notify import validate_webhook_url
     result["LARK_ALERTS_ENABLED"] = raw.get("LARK_ALERTS_ENABLED", False)
     if type(result["LARK_ALERTS_ENABLED"]) is not bool:
         raise ValueError("LARK_ALERTS_ENABLED 必须为 true 或 false")
@@ -91,12 +87,12 @@ def load_config(path, *, require_mail=False):
     elif result["LARK_ALERTS_ENABLED"]:
         raise ValueError("开启异常告警须填写 LARK_WEBHOOK_URL")
 
-    public = Path(result["PUBLISH_DIRECTORY"])
-    for private in (source, Path(result["OUTPUT_DIRECTORY"]), Path(result["STATE_DIRECTORY"])):
-        if private == public or public in private.parents:
-            raise ValueError("网页发布目录不能包含私有配置、原始报告或邮件状态")
     if Path(result["OUTPUT_DIRECTORY"]) == Path(result["STATE_DIRECTORY"]):
         raise ValueError("报告目录与状态目录必须分开")
+    for key in ("OUTPUT_DIRECTORY", "STATE_DIRECTORY"):
+        destination = Path(result[key])
+        if source == destination or destination in source.parents:
+            raise ValueError(key + " 不能包含或覆盖私有配置文件")
     accounts = raw.get("ACCOUNTS")
     if not isinstance(accounts, list) or not accounts:
         raise ValueError("ACCOUNTS 必须为非空账号数组")
@@ -106,8 +102,12 @@ def load_config(path, *, require_mail=False):
         if not isinstance(item, dict):
             raise ValueError(prefix + " 必须为对象")
         account = {}
-        for key in ("NAME", "ACCOUNT_ID", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
+        for key in ("NAME", "ACCOUNT_ID", "TAG", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
             account[key] = _text(item.get(key, ""), prefix + "." + key, required=key in ("NAME", "ACCOUNT_ID"))
+        if (len(account["TAG"]) > 120
+                or any(unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+                       for char in item.get("TAG", ""))):
+            raise ValueError(prefix + ".TAG 必须为不超过 120 字符且无控制字符的字符串")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", account["NAME"]):
             raise ValueError(prefix + ".NAME 仅允许 1-80 位字母、数字、下划线和连字符")
         if not re.fullmatch(r"[0-9]{12}", account["ACCOUNT_ID"]):

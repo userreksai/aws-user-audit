@@ -63,17 +63,72 @@ class AuditMailDeliveryTests(unittest.TestCase):
         self.assertEqual(args[1], [self.pdf, another])
         self.assertIn("123456789012", args[2])
         self.assertIn("210987654321", args[2])
-        self.assertIn("新增 3；删除 2；修改 4", args[2])
-        self.assertIn("Secrets Manager 查看 5", args[2])
+        self.assertTrue(args[2].startswith("各位领导和同事好：\nAWS 账号操作审计日报\n"))
+        self.assertIn("账号总数：2", args[2])
+        self.assertEqual(args[2].count("AWS 账号操作审计日报"), 1)
         self.assertIn("2026-11-03 07:00:00", args[2])
-        self.assertIn("https://example.invalid/audit/", args[2])
+        self.assertNotIn("https://example.invalid/audit/", args[2])
         self.assertIn("不完整", kwargs["subject"])
+
+    def test_three_tagged_accounts_get_one_requested_introduction_and_three_attachments(self):
+        reports, attachments = [], []
+        for index, tag in enumerate(("prod-支付", "uat-预生产", "dev-测试")):
+            item = report(str(796973492024 + index))
+            item["metadata"].update(account_tag=tag,
+                                    window_start_local="2026-11-03 10:00:00+08:00",
+                                    window_end_local_exclusive="2026-11-04 10:00:00+08:00",
+                                    window_start_utc="2026-11-03T02:00:00+00:00",
+                                    window_end_utc_exclusive="2026-11-04T02:00:00+00:00")
+            item["events"] = [{"password": "NEVER_RENDER_REQUEST", "source_ip": "NEVER_RENDER_IP"}]
+            reports.append(item)
+            path = self.root / f"{item['metadata']['account_id']}-2026-11-04-aws操作审计.pdf"
+            path.write_bytes(self.pdf.read_bytes())
+            attachments.append(path)
+        result = delivery.deliver_reports(reports, attachments, self.config, self.state, now=NOW)
+        self.assertEqual(result["status"], "accepted")
+        self.sender.assert_called_once()
+        self.assertEqual(self.sender.call_args.args[1], attachments)
+        self.assertEqual(self.sender.call_args.args[2],
+                         "各位领导和同事好：\nAWS 账号操作审计日报\n"
+                         "查询范围（北京时间，结束时刻不含）：\n"
+                         "2026-11-03 10:00:00 至 2026-11-04 10:00:00\n"
+                         "查询状态：所列查询完成。\n"
+                         "PDF 附件按 IAM 用户 / 角色汇总增删改查及中文事件的调用次数和失败次数。\n"
+                         "账号总数：3\n账号信息：\nprod-支付-796973492024\n"
+                         "uat-预生产-796973492025\ndev-测试-796973492026")
+
+    def test_legacy_missing_tag_lists_id_without_inventing_name_or_label(self):
+        item = report()
+        item["metadata"]["account_name"] = "PRIVATE_OLD_NAME"
+        text = delivery.message_body(item, "https://example.invalid/obsolete-link")
+        self.assertIn("账号总数：1\n账号信息：\n123456789012", text)
+        self.assertNotIn("PRIVATE_OLD_NAME", text)
+        self.assertNotIn("http", text)
+
+    def test_mixed_account_windows_rejected_before_mail_reservation(self):
+        another = report("210987654321")
+        another["metadata"]["window_end_local_exclusive"] = "2026-11-04 09:00:00+08:00"
+        with self.assertRaisesRegex(ValueError, "相同统计窗口"):
+            delivery.deliver_reports([report(), another], [self.pdf, self.pdf], self.config, self.state, now=NOW)
+        self.sender.assert_not_called()
+        self.assertFalse((self.state / "mail-delivery.json").exists())
+
+    def test_body_shows_beijing_time_and_global_incomplete_or_offline_status(self):
+        item = report(complete=False)
+        item["metadata"].update(window_start_local="2026-11-03T02:00:00Z",
+                                window_end_local_exclusive="2026-11-04T02:00:00Z", offline=True)
+        text = delivery.message_body(item)
+        self.assertIn("2026-11-03 10:00:00 至 2026-11-04 10:00:00", text)
+        self.assertIn("查询状态：不完整", text)
+        self.assertNotIn("查询状态：所列查询完成", text)
+        self.assertIn("离线输入报告", text)
 
     def test_automatic_revisions_recipients_and_account_changes_cannot_send_second_message(self):
         self.assertEqual(self.send(automatic=True)["status"], "accepted")
         changed = report()
         changed["metadata"]["counts"]["新增"] = 999
         changed["metadata"]["complete"] = False
+        changed["metadata"]["account_tag"] = "prod-修改标签也不重发"
         self.config["MAIL_RECIPIENTS"] = ["changed@example.invalid"]
         self.assertEqual(self.send(changed, automatic=True)["status"], "suppressed")
         self.assertEqual(self.send(report("210987654321"), automatic=True)["reason"], "daily_limit")

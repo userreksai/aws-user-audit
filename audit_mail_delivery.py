@@ -153,30 +153,49 @@ def _line(value, maximum=256):
     return "".join(character for character in str(value) if ord(character) >= 32 and ord(character) != 127)[:maximum]
 
 
-def _count(value):
-    if type(value) is not int or value < 0:
-        raise ValueError("邮件报告计数必须为非负整数。")
-    return value
+def _mail_window(meta):
+    stamps = []
+    for key in ("window_start_local", "window_end_local_exclusive"):
+        value = meta.get(key)
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, ValueError, TypeError):
+            raise ValueError("邮件报告必须提供有效的统计起止时间。") from None
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError("邮件报告统计时间必须包含时区。")
+        stamps.append(stamp.astimezone(ZoneInfo("Asia/Shanghai")))
+    if stamps[0] >= stamps[1]:
+        raise ValueError("邮件报告统计结束时间必须晚于开始时间。")
+    return tuple(stamps)
 
 
-def message_body(report, report_url=""):
-    """Render only report metadata, never event payloads or provider replies."""
-    meta = report["metadata"]
-    counts = meta["counts"]
-    lines = ["AWS 账号操作审计日报", f"账号：{_line(meta['account_id'])}",
-             f"报表日期：{_day(meta['audit_date'])}",
-             f"新增 {_count(counts.get('新增', 0))}；删除 {_count(counts.get('删除', 0))}；修改 {_count(counts.get('修改', 0))}",
-             f"Secrets Manager 查看 {_count(counts.get('Secrets Manager 查看', 0))}；登录信息 {_count(counts.get('登录信息', 0))}；其他操作 {_count(counts.get('其他操作', 0))}",
-             f"失败或含失败响应：{_count(meta.get('failed_or_partial', 0))}",
-             "查询范围（北京时间，结束时刻不含）：",
-             f"{_line(meta.get('window_start_local', '未提供'))} 至 {_line(meta.get('window_end_local_exclusive', '未提供'))}",
-             "查询状态：所列查询完成。" if meta["complete"] else "查询状态：不完整；部分查询或解析失败，请检查任务日志。"]
-    if meta.get("offline"):
+def message_body(reports, report_url=""):
+    """Render one shared introduction and TAG/account list for all attachments.
+
+    The legacy URL argument is ignored. Only metadata is read; raw events,
+    transport errors and credentials never enter the message.
+    """
+    reports = [reports] if isinstance(reports, dict) else reports
+    if not isinstance(reports, list) or not reports:
+        raise ValueError("邮件正文需要至少一份账号报告。")
+    metadata = [report["metadata"] for report in reports]
+    window = _mail_window(metadata[0])
+    if any(_mail_window(meta) != window for meta in metadata[1:]):
+        raise ValueError("同一封邮件中的账号必须使用相同统计窗口。")
+    complete = all(meta.get("complete") is True for meta in metadata)
+    start, end = (stamp.strftime("%Y-%m-%d %H:%M:%S") for stamp in window)
+    lines = ["各位领导和同事好：", "AWS 账号操作审计日报",
+             "查询范围（北京时间，结束时刻不含）：", f"{start} 至 {end}",
+             "查询状态：所列查询完成。" if complete else
+             "查询状态：不完整；部分账号查询或解析失败，请检查任务日志。",
+             "PDF 附件按 IAM 用户 / 角色汇总增删改查及中文事件的调用次数和失败次数。",
+             f"账号总数：{len(metadata)}", "账号信息："]
+    for meta in metadata:
+        account = _line(meta["account_id"])
+        tag = _line(meta.get("account_tag", ""), 120).strip()
+        lines.append(tag + "-" + account if tag else account)
+    if any(meta.get("offline") for meta in metadata):
         lines.append("离线输入报告；未向 AWS 验证数据完整性。")
-    lines.append("PDF 附件按 IAM 用户 / 角色汇总操作分类及中文事件的调用、失败次数；具体执行明细见网页或本地 JSON 报告。")
-    if report_url:
-        lines.append("网页详情：" + _line(report_url, 2048))
-    lines.append("CloudTrail 日志可能延迟到达；API 请求未报错不代表异步操作最终完成。")
     return "\n".join(lines)
 
 
@@ -216,7 +235,7 @@ def deliver_reports(reports, pdf_paths, config, state_dir, *, automatic=False,
     identity = sorted([str(meta["account_id"]), report_day, str(meta.get("window_start_utc", "")),
                        str(meta.get("window_end_utc_exclusive", ""))] for meta in metadata)
     key = hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode()).hexdigest()
-    body = "\n\n".join(message_body(report, report_url) for report in sorted(reports, key=lambda row: str(row["metadata"]["account_id"])))
+    body = message_body(reports)
     subject = str(config.get("MAIL_SUBJECT", "AWS账号操作审计日报")) + " " + report_day
     if not complete:
         subject += " [不完整]"

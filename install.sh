@@ -6,29 +6,21 @@ umask 077
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ORIGINAL_DIR=$PWD
 INSTALL_DIR=/usr/local/aws-user-audit
-PUBLISH_DIR=
-NGINX_CONFIG=/etc/nginx/conf.d/zybocedata-pass.v668live.com.conf
 CONFIG_PATH=
 PYTHON=python3
 DRY_RUN=0
 UPDATE=0
-SERVER_NAME=zybocedata-pass.v668live.com
 UNIT_DIR=/etc/systemd/system
 TIMER_STAMP=/var/lib/systemd/timers/stamp-aws-user-audit.timer
 WORK_DIR=
 BACKUP_DIR=
-NGINX_BACKUP=
 TRANSACTION=0
 COMMITTED=0
-NGINX_CHANGED=0
 UNITS_CHANGED=0
 STAMP_CHANGED=0
-WEB_CHANGED=0
 CODE_CHANGED=0
 OLD_TIMER_ACTIVE=0
 OLD_TIMER_ENABLED=disabled
-OLD_WEB_ACTIVE=0
-OLD_WEB_ENABLED=disabled
 ROLLBACK_FAILED=0
 STAGING_FILES=()
 
@@ -36,8 +28,8 @@ usage() {
     cat <<'HELP'
 Usage: sudo bash install.sh [options]
   --install-dir DIR   Code/venv directory (default: /usr/local/aws-user-audit)
-  --publish-dir DIR   Static report directory (default: INSTALL_DIR/index)
-  --nginx-config FILE Existing host Nginx vhost to patch
+  --publish-dir DIR   Deprecated; accepted and ignored (PDF/email only)
+  --nginx-config FILE Deprecated; accepted and ignored (Nginx is not touched)
   --config FILE       Private unified JSON/JSONC (default: INSTALL_DIR/aws-audit-config.json)
   --python COMMAND    System Python >=3.10 used to create the venv
   --update            Clone public main into a temporary checkout first
@@ -76,8 +68,8 @@ read_schedule() {
 while (($#)); do
     case $1 in
         --install-dir) need_value "$@"; INSTALL_DIR=$2; shift 2 ;;
-        --publish-dir) need_value "$@"; PUBLISH_DIR=$2; shift 2 ;;
-        --nginx-config) need_value "$@"; NGINX_CONFIG=$2; shift 2 ;;
+        --publish-dir|--nginx-config)
+            need_value "$@"; say "兼容参数 $1 已忽略；本版本仅生成 PDF/JSON 和邮件，不操作网页或 Nginx。"; shift 2 ;;
         --config) need_value "$@"; CONFIG_PATH=$2; shift 2 ;;
         --python) need_value "$@"; PYTHON=$2; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -87,15 +79,16 @@ while (($#)); do
     esac
 done
 
-[[ -n $PUBLISH_DIR ]] || PUBLISH_DIR=$INSTALL_DIR/index
 [[ -n $CONFIG_PATH ]] || CONFIG_PATH=$INSTALL_DIR/aws-audit-config.json
-for setting in INSTALL_DIR PUBLISH_DIR NGINX_CONFIG CONFIG_PATH; do
+for setting in INSTALL_DIR CONFIG_PATH; do
     value=${!setting}
     [[ $value == /* ]] || value=$ORIGINAL_DIR/$value
-    [[ $value != *$'\n'* && $value != *$'\r'* ]] || die '路径不能包含换行。'
+    [[ $value =~ ^/[A-Za-z0-9_./-]+$ && $value != //* ]] \
+        || die '部署路径必须是明确的 Linux 绝对路径，只能使用字母、数字、下划线、点、短横线和斜杠。'
+    case $value/ in */../*|*/./*) die '部署路径不能包含 . 或 .. 路径段。' ;; esac
     printf -v "$setting" '%s' "${value%/}"
 done
-case $INSTALL_DIR in ''|/|/usr|/usr/local|/etc|/var|/bin|/sbin|/root) die '请指定专用安装目录。' ;; esac
+case $INSTALL_DIR in ''|/|/usr|/usr/local|/etc|/var|/bin|/sbin|/root|/home|/tmp) die '请指定专用安装目录。' ;; esac
 for marker in rds_multi.py rds_config.py; do
     [[ ! -e $INSTALL_DIR/$marker && ! -L $INSTALL_DIR/$marker ]] \
         || die '安装目录包含 RDS 项目标识；请使用独立 AWS 账号审计目录，不能覆盖 RDS。'
@@ -132,7 +125,7 @@ restore_enabled() {
 
 rollback() {
     local unit relative
-    say '安装失败，正在恢复原 Nginx 配置和定时器状态。' >&2
+    say '安装失败，正在恢复原运行文件和定时器状态。' >&2
     if ((UNITS_CHANGED)); then
         systemctl stop aws-user-audit.timer >/dev/null 2>&1 || ROLLBACK_FAILED=1
         # Remove links created by enable even when there was no old unit.
@@ -161,23 +154,6 @@ rollback() {
             cp -p -- "$BACKUP_DIR/timer-stamp" "$TIMER_STAMP" || ROLLBACK_FAILED=1
         else
             rm -f -- "$TIMER_STAMP" || ROLLBACK_FAILED=1
-        fi
-    fi
-    if ((WEB_CHANGED)); then
-        restore_enabled aws-audit-web.service "$OLD_WEB_ENABLED" || ROLLBACK_FAILED=1
-        if ((OLD_WEB_ACTIVE)); then
-            systemctl start aws-audit-web.service >/dev/null 2>&1 || ROLLBACK_FAILED=1
-        fi
-    fi
-    if ((NGINX_CHANGED)); then
-        if atomic_file "$NGINX_BACKUP" "$NGINX_CONFIG" "$NGINX_BACKUP"; then
-            if nginx -t >"$BACKUP_DIR/nginx-rollback.log" 2>&1; then
-                systemctl reload nginx >"$BACKUP_DIR/nginx-rollback-reload.log" 2>&1 || ROLLBACK_FAILED=1
-            else
-                ROLLBACK_FAILED=1
-            fi
-        else
-            ROLLBACK_FAILED=1
         fi
     fi
     restore_enabled aws-user-audit.timer "$OLD_TIMER_ENABLED" || ROLLBACK_FAILED=1
@@ -220,26 +196,17 @@ if ((DRY_RUN)); then
     command -v "$PYTHON" >/dev/null 2>&1 || die 'dry-run 需要现有 Python；不会自动安装。'
     [[ -f $SOURCE_DIR/deploy/install_support.py ]] || die '缺少部署 helper，请使用完整代码目录。'
     "$PYTHON" "$SOURCE_DIR/deploy/install_support.py" render \
-        --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" \
+        --install-dir "$INSTALL_DIR" \
         --config "$CONFIG_PATH" --output-dir "$WORK_DIR/units"
     read_schedule
-    say '【dry-run】仅渲染临时计划；未联网、未安装软件、未修改 Nginx 或 systemd。'
+    say '【dry-run】仅渲染临时计划；未联网、未安装软件、未修改系统服务。'
     ((UPDATE == 0)) || say '实际 --update 时将临时 clone 公共仓库 main；本次使用本地代码渲染。'
     say "代码目录：$INSTALL_DIR"
     say "Python 环境：$INSTALL_DIR/.venv"
-    say "网页目录：$PUBLISH_DIR"
     say "统一私有配置：$CONFIG_PATH"
-    say "Nginx 配置：$NGINX_CONFIG"
-    say 'Nginx 只替换 /audit/；原前端 / → 8890 和其他配置保留。'
+    say '报告：仅归档 PDF/JSON 并通过邮件发送；不创建网页目录，不读取或修改 Nginx。'
     say "定时：每天北京时间 $DAILY_MAIL_TIME，启用停机补跑；安装当次不执行日报。"
     say "报告窗口：北京时间前一天 $REPORT_START_TIME 至报表日 $REPORT_END_TIME。"
-    if [[ -r $NGINX_CONFIG ]]; then
-        "$PYTHON" "$SOURCE_DIR/deploy/nginx_config.py" plan --nginx-config "$NGINX_CONFIG" \
-            --publish-dir "$PUBLISH_DIR" --server-name "$SERVER_NAME" --listen-port 8889 \
-            --output "$WORK_DIR/nginx-candidate.conf"
-    else
-        say '当前环境无法读取目标 Nginx 文件；实际安装必须能够读取并审核该文件。'
-    fi
     say '生成的 service：'
     cat -- "$WORK_DIR/units/aws-user-audit.service"
     say '生成的 timer：'
@@ -249,13 +216,12 @@ fi
 
 [[ $(uname -s) == Linux ]] || die '实际安装只支持 Linux。'
 ((EUID == 0)) || die '实际安装需 root；可用 --dry-run 先查看计划。'
-for required in systemctl systemd-analyze nginx flock curl mktemp cp mv install awk grep cmp; do
+for required in systemctl systemd-analyze flock mktemp cp mv install awk; do
     command -v "$required" >/dev/null 2>&1 || die "缺少必要命令：$required。"
 done
 [[ -d /run/systemd/system ]] || die '本机未运行 systemd；不能安装定时服务。'
 exec 9>/run/lock/aws-user-audit-install.lock
 flock -n 9 || die '另一个安装/更新进程正在运行。'
-[[ -f $NGINX_CONFIG && ! -L $NGINX_CONFIG ]] || die '目标 Nginx 必须是已存在的普通配置文件，不能是符号链接。'
 
 active_state=$(systemctl show -p ActiveState --value aws-user-audit.service 2>/dev/null || true)
 case $active_state in active|activating|reloading|deactivating) die '日报服务正在执行，请结束后重试；安装器不会打断它。' ;; esac
@@ -283,10 +249,22 @@ fi
 RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_actions.py audit_event_catalog.py aws-event-translations.json audit_identity_summary.py audit_config.py audit_schedule.py audit_mail.py audit_mail_delivery.py
     audit_pdf.py audit_alerts.py lark_notify.py requirements.txt install.sh README.md
     iam-policy.json iam-policy-single-region.json aws-audit-config.example.json
-    deploy/install_support.py deploy/run_scheduled.py deploy/nginx_config.py)
+    deploy/install_support.py deploy/run_scheduled.py)
 for relative in "${RUNTIME_FILES[@]}"; do
     [[ -f $SOURCE_DIR/$relative && ! -L $SOURCE_DIR/$relative ]] || die "源码包缺少普通文件：$relative。"
 done
+
+# First install creates only the private, complete template. Existing private
+# settings are never copied from the repository or rewritten by the installer.
+[[ ! -L $INSTALL_DIR && ! -L $INSTALL_DIR/deploy ]] || die '安装目录或部署 helper 不能为符号链接。'
+if [[ ! -e $CONFIG_PATH ]]; then
+    [[ ! -L $CONFIG_PATH ]] || die '统一配置不能为符号链接。'
+    install -d -m 0755 -- "$INSTALL_DIR"
+    [[ -d $(dirname -- "$CONFIG_PATH") ]] || die '统一配置父目录不存在；请先创建并放入私有配置。'
+    install -m 0600 -- "$SOURCE_DIR/aws-audit-config.example.json" "$CONFIG_PATH"
+    die "已创建私有配置模板：$CONFIG_PATH。请填写启用账号及邮件配置后重跑；未启用定时器。"
+fi
+[[ -f $CONFIG_PATH && ! -L $CONFIG_PATH ]] || die '统一配置必须为普通私有文件。'
 
 apt_updated=0
 apt_python() {
@@ -305,16 +283,9 @@ if ! "$PYTHON" -c 'import venv, ensurepip' >/dev/null 2>&1; then
 fi
 
 "$PYTHON" "$SOURCE_DIR/deploy/install_support.py" render \
-    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" \
+    --install-dir "$INSTALL_DIR" \
     --config "$CONFIG_PATH" --output-dir "$WORK_DIR/units"
 read_schedule
-cp -p -- "$NGINX_CONFIG" "$WORK_DIR/nginx-original.conf"
-"$PYTHON" "$SOURCE_DIR/deploy/nginx_config.py" plan --nginx-config "$WORK_DIR/nginx-original.conf" \
-    --publish-dir "$PUBLISH_DIR" --server-name "$SERVER_NAME" --listen-port 8889 \
-    --output "$WORK_DIR/nginx-candidate.conf"
-
-[[ ! -L $INSTALL_DIR && ! -L $PUBLISH_DIR && ! -L $INSTALL_DIR/deploy ]] \
-    || die '安装、部署 helper 或发布目录不能为符号链接。'
 
 # Pause this timer before touching its code or virtual environment. Stop does
 # not interrupt a running oneshot, so check the service again after stopping.
@@ -322,10 +293,6 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$
 BACKUP_DIR=$INSTALL_DIR/.installer-backups/$stamp
 [[ ! -L $INSTALL_DIR/.installer-backups ]] || die '备份目录不能为符号链接。'
 install -d -m 0700 -- "$INSTALL_DIR/.installer-backups" "$BACKUP_DIR"
-NGINX_BACKUP=$NGINX_CONFIG.aws-user-audit-$stamp.bak
-cp -p -- "$NGINX_CONFIG" "$NGINX_BACKUP"
-cmp -s -- "$WORK_DIR/nginx-original.conf" "$NGINX_BACKUP" \
-    || die '生成候选期间 Nginx 配置已被其他操作修改，请检查后重试。'
 for unit in aws-user-audit.service aws-user-audit.timer; do
     [[ ! -L $UNIT_DIR/$unit ]] || die '现有 systemd 单元是符号链接，请先人工检查。'
     if [[ -f $UNIT_DIR/$unit ]]; then
@@ -337,18 +304,17 @@ done
 if [[ -f $TIMER_STAMP ]]; then cp -p -- "$TIMER_STAMP" "$BACKUP_DIR/timer-stamp"; fi
 if systemctl is-active --quiet aws-user-audit.timer; then OLD_TIMER_ACTIVE=1; fi
 OLD_TIMER_ENABLED=$(systemctl is-enabled aws-user-audit.timer 2>/dev/null || true)
-if systemctl is-active --quiet aws-audit-web.service; then OLD_WEB_ACTIVE=1; fi
-OLD_WEB_ENABLED=$(systemctl is-enabled aws-audit-web.service 2>/dev/null || true)
 TRANSACTION=1
 if ((OLD_TIMER_ACTIVE)); then systemctl stop aws-user-audit.timer; fi
 active_state=$(systemctl show -p ActiveState --value aws-user-audit.service 2>/dev/null || true)
 case $active_state in active|activating|reloading|deactivating) die '日报服务恰好开始执行，本次停止安装并恢复原定时状态。' ;; esac
 
-install -d -m 0755 -- "$INSTALL_DIR" "$INSTALL_DIR/deploy" "$PUBLISH_DIR"
+install -d -m 0755 -- "$INSTALL_DIR" "$INSTALL_DIR/deploy"
 install -d -m 0700 -- "$BACKUP_DIR/runtime" "$BACKUP_DIR/runtime/deploy"
 for relative in "${RUNTIME_FILES[@]}"; do
     destination=$INSTALL_DIR/$relative
     [[ ! -L $destination ]] || die '目标源码文件不能为符号链接。'
+    [[ ! $CONFIG_PATH -ef $destination ]] || die '统一私有配置不能与运行文件共用路径。'
     if [[ -e $destination ]]; then
         [[ -f $destination ]] || die '目标源码路径不是普通文件。'
         cp -p -- "$destination" "$BACKUP_DIR/runtime/$relative"
@@ -366,13 +332,6 @@ for relative in "${RUNTIME_FILES[@]}"; do
     atomic_file "$SOURCE_DIR/$relative" "$destination" '' "$mode"
 done
 
-if [[ ! -e $CONFIG_PATH ]]; then
-    [[ ! -L $CONFIG_PATH ]] || die '统一配置不能为符号链接。'
-    [[ -d $(dirname -- "$CONFIG_PATH") ]] || die '统一配置父目录不存在；请先创建并放入私有配置。'
-    install -m 0600 -- "$INSTALL_DIR/aws-audit-config.example.json" "$CONFIG_PATH"
-    die "已创建私有配置模板：$CONFIG_PATH。请填写启用账号及邮件配置后重跑；未启用定时器。"
-fi
-[[ -f $CONFIG_PATH && ! -L $CONFIG_PATH ]] || die '统一配置必须为普通私有文件。'
 chmod 0600 -- "$CONFIG_PATH"
 [[ ! -L $INSTALL_DIR/.venv ]] || die '.venv 不能为符号链接。'
 if [[ ! -x $INSTALL_DIR/.venv/bin/python ]]; then
@@ -381,7 +340,7 @@ fi
 VENV_PYTHON=$INSTALL_DIR/.venv/bin/python
 "$VENV_PYTHON" -m pip install -r "$INSTALL_DIR/requirements.txt"
 "$VENV_PYTHON" "$INSTALL_DIR/deploy/install_support.py" preflight \
-    --install-dir "$INSTALL_DIR" --publish-dir "$PUBLISH_DIR" --config "$CONFIG_PATH" \
+    --install-dir "$INSTALL_DIR" --config "$CONFIG_PATH" \
     --daily-mail-time "$DAILY_MAIL_TIME" --report-start-time "$REPORT_START_TIME" --report-end-time "$REPORT_END_TIME"
 
 systemd-analyze verify "$WORK_DIR/units/aws-user-audit.service" "$WORK_DIR/units/aws-user-audit.timer" \
@@ -390,24 +349,6 @@ calendar=$(awk '/^OnCalendar=/ {sub(/^OnCalendar=/, ""); print; exit}' "$WORK_DI
 [[ -n $calendar ]] || die '生成的定时器缺少 OnCalendar。'
 systemd-analyze calendar "$calendar" >"$WORK_DIR/calendar.log" 2>&1 \
     || die '本机 systemd 不支持目标北京时间表达式；系统配置尚未变更。'
-
-# Backups do not end in .conf, so conf.d/*.conf never loads them.
-cmp -s -- "$NGINX_CONFIG" "$NGINX_BACKUP" \
-    || die '安装过程中 Nginx 配置已被其他操作修改，停止覆盖；请检查后重试。'
-NGINX_CHANGED=1
-atomic_file "$WORK_DIR/nginx-candidate.conf" "$NGINX_CONFIG" "$NGINX_BACKUP"
-if ! nginx -t >"$BACKUP_DIR/nginx-test.log" 2>&1; then
-    # Restore the file immediately. The live Nginx has not been reloaded.
-    atomic_file "$NGINX_BACKUP" "$NGINX_CONFIG" "$NGINX_BACKUP"
-    NGINX_CHANGED=0
-    die "Nginx 校验失败，已恢复原文件且没有 reload；日志：$BACKUP_DIR/nginx-test.log。"
-fi
-nginx -T >"$WORK_DIR/nginx-expanded.conf" 2>"$BACKUP_DIR/nginx-dump.log" \
-    || die '无法验证 Nginx 实际加载链，停止 reload 并恢复原配置。'
-grep -Fqx -- "# configuration file $NGINX_CONFIG:" "$WORK_DIR/nginx-expanded.conf" \
-    || die '目标 Nginx 文件不在当前加载链，停止 reload 并恢复原配置。'
-systemctl reload nginx >"$BACKUP_DIR/nginx-reload.log" 2>&1 \
-    || die "Nginx reload 失败，将恢复原文件并校验后 reload；日志：$BACKUP_DIR/nginx-reload.log。"
 
 UNITS_CHANGED=1
 atomic_file "$WORK_DIR/units/aws-user-audit.service" "$UNIT_DIR/aws-user-audit.service"
@@ -420,19 +361,13 @@ touch -- "$TIMER_STAMP"
 systemctl enable --now aws-user-audit.timer
 systemctl is-active --quiet aws-user-audit.timer || die '定时器没有进入 active 状态。'
 
-# Only retire the old password backend after the static Nginx route is live.
-if [[ $(systemctl show -p LoadState --value aws-audit-web.service 2>/dev/null || true) == loaded ]]; then
-    WEB_CHANGED=1
-    systemctl disable --now aws-audit-web.service
-fi
 systemctl list-timers --all --no-pager aws-user-audit.timer >"$WORK_DIR/timer-status"
 COMMITTED=1
 say '安装完成；本次没有立即执行日报或发送邮件/Lark。'
 say "代码：$INSTALL_DIR"
 say "Python：$VENV_PYTHON"
-say "网页：$PUBLISH_DIR/index.html"
 say "统一私有配置：$CONFIG_PATH"
-say "Nginx 备份：$NGINX_BACKUP"
+say '报告：仅 PDF/JSON 归档和邮件；原 Nginx 配置与旧网页未作任何修改。'
 say "单元备份：$BACKUP_DIR"
 say "报告窗口：北京时间前一天 $REPORT_START_TIME 至报表日 $REPORT_END_TIME。"
 say "下一次执行（北京时间每天 $DAILY_MAIL_TIME 开始采集，完成后发送邮件）："

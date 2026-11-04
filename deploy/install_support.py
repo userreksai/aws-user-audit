@@ -56,14 +56,10 @@ def unit_arg(value):
 
 def render_units(install_dir=DEFAULT_INSTALL_DIR, publish_dir=None, config_path=None, *, catch_up=True,
                  daily_mail_time=DEFAULT_DAILY_MAIL_TIME):
+    """Render PDF/mail units; ``publish_dir`` is ignored for old callers."""
     parse_clock(daily_mail_time, "DAILY_MAIL_TIME")
     install_dir = linux_path(install_dir)
-    publish_dir = linux_path(publish_dir or str(PurePosixPath(install_dir) / "index"))
     config_path = linux_path(config_path or str(PurePosixPath(install_dir) / "aws-audit-config.json"))
-    public = PurePosixPath(publish_dir)
-    for private in (PurePosixPath(install_dir), PurePosixPath(install_dir) / "reports", PurePosixPath(config_path)):
-        if private == public or public in private.parents:
-            raise ValueError("网页目录不能包含代码、归档报告或私有配置。")
     install = PurePosixPath(install_dir)
     arguments = [str(install / ".venv/bin/python"), str(install / "deploy/run_scheduled.py"),
                  "--install-dir", install_dir, "--config", config_path]
@@ -104,7 +100,7 @@ WantedBy=timers.target
 
 
 def local_preflight(install_dir, config_path, publish_dir=None, *, expected_schedule=None):
-    """Validate private settings/profiles locally, without AWS or SMTP requests."""
+    """Validate locally; legacy ``publish_dir`` no longer controls a webroot."""
     linux_path(install_dir)
     target = Path(config_path)
     if not target.is_file() or target.is_symlink():
@@ -127,9 +123,7 @@ def local_preflight(install_dir, config_path, publish_dir=None, *, expected_sche
                       config.get("REPORT_START_TIME", DEFAULT_REPORT_START_TIME),
                       config.get("REPORT_END_TIME", DEFAULT_REPORT_END_TIME))
             if tuple(expected_schedule) != actual:
-                raise ValueError("生成计划后时间配置已变化，请重新运行安装器；未修改 Nginx 或 systemd。")
-        if publish_dir is not None and config.get("PUBLISH_DIRECTORY") != linux_path(publish_dir):
-            raise ValueError("配置 PUBLISH_DIRECTORY 必须与安装器 --publish-dir 一致；未修改配置或 Nginx。")
+                raise ValueError("生成计划后时间配置已变化，请重新运行安装器；未修改 systemd。")
         profiles = sorted({validate_profile(account["AWS_PROFILE"])
                            for account in config["ACCOUNTS"]
                            if account.get("ENABLED", True) and account.get("AWS_PROFILE")})
@@ -162,7 +156,7 @@ def main(argv=None):
     for command in (render, check):
         command.add_argument("--install-dir", required=True)
         command.add_argument("--config", required=True)
-        command.add_argument("--publish-dir", required=True)
+        command.add_argument("--publish-dir", help="兼容旧命令；已忽略，不创建网页或操作 Nginx")
     render.add_argument("--catch-up", choices=("yes", "no"), default="yes")
     render.add_argument("--output-dir", required=True)
     check.add_argument("--daily-mail-time", help="安装器已生成计划中的发送时刻，用于检查并发修改")
@@ -185,11 +179,11 @@ def main(argv=None):
         directory.mkdir(parents=True, exist_ok=True)
         for name, value in units.items():
             (directory / name).write_text(value, encoding="utf-8", newline="\n")
-        plan = {"install_dir": args.install_dir, "publish_dir": args.publish_dir,
+        plan = {"install_dir": args.install_dir,
                 "config": args.config, "timezone": "Asia/Shanghai", "time": schedule["daily_mail_time"] + ":00",
                 **schedule,
                 "catch_up": args.catch_up == "yes", "installation_runs_report": False,
-                "password_authentication": False}
+                "report_formats": ["pdf", "json"], "html_publication": False}
         (directory / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         # A validated, single-line settings subset for the Bash installer; never secrets.
         (directory / "schedule.env").write_text(
