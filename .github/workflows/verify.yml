@@ -29,7 +29,7 @@ jobs:
           test_deployment test_nginx_config test_install_script
           test_audit_mail test_audit_mail_delivery test_audit_pdf
           test_audit_config test_audit_multi test_audit_alerts test_audit_schedule test_audit_actions
-          test_audit_identity_summary test_audit_event_catalog
+          test_audit_identity_summary test_audit_event_catalog test_audit_resource_summary test_audit_mail_summary
       - name: Bash syntax and deployment preview
         run: |
           bash -n install.sh

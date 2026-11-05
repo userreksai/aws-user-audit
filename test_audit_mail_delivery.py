@@ -88,14 +88,21 @@ class AuditMailDeliveryTests(unittest.TestCase):
         self.assertEqual(result["status"], "accepted")
         self.sender.assert_called_once()
         self.assertEqual(self.sender.call_args.args[1], attachments)
-        self.assertEqual(self.sender.call_args.args[2],
+        self.assertTrue(self.sender.call_args.args[2].startswith(
                          "各位领导和同事好：\nAWS 账号操作审计日报\n"
                          "查询范围（北京时间，结束时刻不含）：\n"
                          "2026-11-03 10:00:00 至 2026-11-04 10:00:00\n"
                          "查询状态：所列查询完成。\n"
                          "PDF 附件按 IAM 用户 / 角色汇总增删改查及中文事件的调用次数和失败次数。\n"
                          "账号总数：3\n账号信息：\nprod-支付-796973492024\n"
-                         "uat-预生产-796973492025\ndev-测试-796973492026")
+                         "uat-预生产-796973492025\ndev-测试-796973492026\n\n"))
+        html = self.sender.call_args.kwargs["html_body"]
+        self.assertIn("各位领导和同事好：", html)
+        for index, tag in enumerate(("prod-支付", "uat-预生产", "dev-测试")):
+            self.assertIn(str(796973492024 + index) + "-" + tag, html)
+        for content in (self.sender.call_args.args[2], html):
+            self.assertNotIn("NEVER_RENDER_REQUEST", content)
+            self.assertNotIn("NEVER_RENDER_IP", content)
 
     def test_legacy_missing_tag_lists_id_without_inventing_name_or_label(self):
         item = report()

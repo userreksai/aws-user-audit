@@ -152,6 +152,29 @@ class MailDeliveryTests(unittest.TestCase):
         self.assertEqual(self.smtp.send_message.call_args.args[0]["Subject"], "自定义标题")
 
     @patch("audit_mail.smtplib.SMTP_SSL")
+    def test_html_table_and_text_fallback_keep_original_pdf_attachment_bytes(self, constructor):
+        constructor.return_value = self.smtp
+        text = "具体用户 | 安全组 | EC2\nbeiou | 2 | 3"
+        html = '<table><tr><th>具体用户</th><th>安全组</th><th>EC2</th></tr><tr><td>beiou</td><td>2</td><td>3</td></tr></table>'
+        result = send_reports(self.config, self.files, text, html_body=html)
+        self.assertTrue(result["smtp_accepted"])
+        message = self.smtp.send_message.call_args.args[0]
+        self.assertEqual(message.get_content_type(), "multipart/mixed")
+        self.assertEqual(message.get_body(preferencelist=("plain",)).get_content().strip(), text)
+        self.assertEqual(message.get_body(preferencelist=("html",)).get_content().strip(), html)
+        parts = list(message.iter_attachments())
+        self.assertEqual([part.get_filename() for part in parts], [path.name for path in self.files])
+        self.assertEqual([part.get_payload(decode=True) for part in parts], [path.read_bytes() for path in self.files])
+        self.assertTrue(all(part.get_content_type() == "application/pdf" for part in parts))
+        self.assertEqual([part.get_content_type() for part in message.walk()].count("text/html"), 1)
+
+    @patch("audit_mail.smtplib.SMTP_SSL")
+    def test_invalid_html_body_never_contacts_smtp(self, constructor):
+        with self.assertRaisesRegex(ValueError, "HTML"):
+            send_reports(self.config, self.files, "body", html_body={"not": "text"})
+        constructor.assert_not_called()
+
+    @patch("audit_mail.smtplib.SMTP_SSL")
     def test_partial_refusal_is_uncertain_and_error_is_sanitized(self, constructor):
         constructor.return_value = self.smtp
         self.smtp.send_message.return_value = {"copy@example.com": (550, b"PRIVATE-PROVIDER-REPLY")}

@@ -2,6 +2,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 import io
 import json
 import os
@@ -21,6 +22,45 @@ NOW = datetime(2026, 11, 4, 0, 1, tzinfo=timezone.utc)
 SECRET = "TEST_AWS_SECRET_MUST_NOT_APPEAR"
 EVENT_SECRET = "TEST_EVENT_PASSWORD_MUST_NOT_APPEAR"
 PROVIDER_SECRET = "TEST_PROVIDER_RESPONSE_SECRET_MUST_NOT_APPEAR"
+
+
+class MailTables(HTMLParser):
+    """Read rendered account tables without depending on CSS or whitespace."""
+    def __init__(self, markup):
+        super().__init__()
+        self.tables, self.outside = [], []
+        self.table = self.row = self.cell = None
+        self.feed(markup)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.table = {"label": "".join(self.outside), "rows": []}
+            self.outside = []
+            self.tables.append(self.table)
+        elif tag == "tr" and self.table is not None:
+            self.row = []
+        elif tag in {"th", "td"} and self.row is not None:
+            self.cell = []
+        elif tag == "br" and self.cell is not None:
+            self.cell.append(" ")
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell.append(data)
+        elif self.table is None:
+            self.outside.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in {"th", "td"} and self.cell is not None:
+            self.row.append(" ".join("".join(self.cell).split()))
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            if self.row:
+                self.table["rows"].append(self.row)
+            self.row = None
+        elif tag == "table":
+            self.table = None
 
 
 def account(number=1, **overrides):
@@ -118,6 +158,31 @@ class MultiAccountTests(unittest.TestCase):
         with patch("boto3.Session", factory), redirect_stdout(self.stdout), redirect_stderr(self.stderr):
             return multi.run_report(config, "2026-11-04", now=NOW, **options)
 
+    def assert_mail_accounts(self, smtp, accounts):
+        html_body = smtp.call_args.kwargs["html_body"]
+        self.assertIsInstance(html_body, str)
+        tables = MailTables(html_body).tables
+        self.assertEqual(len(tables), len(accounts))
+        plain_body = smtp.call_args.args[2]
+        for selected, table in zip(accounts, tables):
+            self.assertIn(selected["ACCOUNT_ID"], table["label"])
+            self.assertIn(selected["ACCOUNT_ID"], plain_body)
+            if selected.get("TAG"):
+                self.assertIn(selected["TAG"], table["label"])
+                self.assertIn(selected["TAG"], plain_body)
+            header = table["rows"][0]
+            self.assertEqual(header, ["具体用户", "安全组", "负载均衡", "弹性IP申请/绑定", "VPC", "路由表", "EC2", "RDS"])
+            for label in header:
+                self.assertIn(label, plain_body)
+            for row in table["rows"][1:]:
+                self.assertIn(" | ".join(row), plain_body)
+        return tables
+
+    def assert_user_counts(self, table, name, counts):
+        rows = [row for row in table["rows"][1:] if name in row[0]]
+        self.assertEqual(len(rows), 1, table)
+        self.assertEqual(rows[0][1:], [str(value) for value in counts])
+
     def test_7_accounts_produce_separate_real_pdfs_and_one_combined_mail_with_no_secret_leak(self):
         accounts = [account(number, TAG=f"生产账号-{number}") for number in range(1, 8)]
         config, _ = self.config(accounts)
@@ -131,6 +196,11 @@ class MultiAccountTests(unittest.TestCase):
         self.assertEqual(len(smtp.call_args.args[1]), 7)
         names = [path.name for path in smtp.call_args.args[1]]
         self.assertEqual(len(set(names)), 7)
+        tables = self.assert_mail_accounts(smtp, accounts)
+        for table in tables:
+            self.assert_user_counts(table, "hhjgx", [0, 0, 0, 0, 0, 1, 0])
+        for secret in (SECRET, EVENT_SECRET, PROVIDER_SECRET, "TEST_SMTP_SECRET"):
+            self.assertNotIn(secret, smtp.call_args.args[2] + smtp.call_args.kwargs["html_body"])
         for row in accounts:
             expected = row["ACCOUNT_ID"]
             archive = Path(config["OUTPUT_DIRECTORY"]) / expected / "2026-11-04"
@@ -186,6 +256,9 @@ class MultiAccountTests(unittest.TestCase):
         self.assertEqual(result, 0, self.stderr.getvalue())
         smtp.assert_called_once()
         self.assertEqual(len(smtp.call_args.args[1]), 3)
+        tables = self.assert_mail_accounts(smtp, accounts)
+        for table in tables:
+            self.assert_user_counts(table, "hhjgx", [0, 0, 0, 0, 0, 1, 0])
         for selected in accounts:
             self.assertIn(selected["ACCOUNT_ID"], smtp.call_args.args[2])
             self.assertIn(selected["TAG"], smtp.call_args.args[2])
@@ -202,6 +275,47 @@ class MultiAccountTests(unittest.TestCase):
         selected["TAG"] = "AWS 生产环境"
         report = multi.collect_account(selected, day, start, end, session_factory=lambda **kwargs: session)
         self.assertEqual(report["metadata"]["account_tag"], selected["TAG"])
+
+    def test_mail_tables_follow_enabled_accounts_when_configuration_adds_or_removes_accounts(self):
+        variants = ([account(1, TAG="生产"), account(2, TAG="测试"), account(3, TAG="预发布")],
+                    [account(1, TAG="生产"), account(3, TAG="预发布")],
+                    [account(1, TAG="生产"), account(2, ENABLED=False, TAG="已停用"),
+                     account(3, TAG="预发布"), account(4, TAG="新增环境")])
+        for index, accounts in enumerate(variants):
+            with self.subTest(account_ids=[row["ACCOUNT_ID"] for row in accounts]):
+                config, _ = self.config(accounts, OUTPUT_DIRECTORY=f"reports-{index}", STATE_DIRECTORY=f".state-{index}")
+                factory, _ = self.factory(accounts)
+                with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+                    self.assertEqual(self.execute_report(config, factory, send_mail=True), 0, self.stderr.getvalue())
+                enabled = [row for row in accounts if row["ENABLED"]]
+                self.assertEqual(factory.call_count, len(enabled))
+                self.assert_mail_accounts(smtp, enabled)
+                self.assertEqual({path.name.split("-", 1)[0] for path in smtp.call_args.args[1]},
+                                 {row["ACCOUNT_ID"] for row in enabled})
+                for disabled in (row for row in accounts if not row["ENABLED"]):
+                    for body in (smtp.call_args.args[2], smtp.call_args.kwargs["html_body"]):
+                        self.assertNotIn(disabled["ACCOUNT_ID"], body)
+                        self.assertNotIn(disabled["TAG"], body)
+
+    def test_account_without_events_is_explicit_in_both_mail_formats_and_keeps_its_pdf(self):
+        selected = account(TAG="无操作账号")
+        config, _ = self.config([selected])
+        factory, sessions = self.factory([selected])
+        trail = sessions[selected["AWS_ACCESS_KEY_ID"]].client("cloudtrail", region_name="eu-north-1")
+        trail.lookup_events = Mock(return_value={"Events": []})
+        with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 0, self.stderr.getvalue())
+        smtp.assert_called_once()
+        for body in (smtp.call_args.args[2], smtp.call_args.kwargs["html_body"]):
+            self.assertIn(selected["ACCOUNT_ID"] + "-" + selected["TAG"], body)
+            self.assertIn("本账号无报告事件", body)
+            self.assertIn("所列查询完成", body)
+            self.assertNotIn("统计不可用", body)
+        self.assertEqual(MailTables(smtp.call_args.kwargs["html_body"]).tables, [])
+        self.assertEqual(len(smtp.call_args.args[1]), 1)
+        self.assertTrue(smtp.call_args.args[1][0].read_bytes().startswith(b"%PDF-"))
+        self.assertIn(selected["ACCOUNT_ID"], "\n".join(page.extract_text() or ""
+                      for page in PdfReader(smtp.call_args.args[1][0]).pages))
 
     def test_identity_mismatch_stops_region_discovery_and_cloudtrail_before_reading_other_account(self):
         selected = account(REGIONS="all")
@@ -235,6 +349,15 @@ class MultiAccountTests(unittest.TestCase):
                                     "arn": f"arn:aws:sts::{account_id}:assumed-role/DeployRole/{name}",
                                     "sessionContext": {"sessionIssuer": {"userName": "DeployRole",
                                         "arn": f"arn:aws:iam::{account_id}:role/DeployRole"}}}
+            if name == "session-two":
+                item["errorCode"] = "UnauthorizedOperation"
+            rows.append(item)
+        for name in ("AllocateAddress", "AssociateAddress"):
+            item = event(account_id)
+            item.update(eventID="eip-" + name, eventName=name)
+            item["userIdentity"].update(userName="beiou", arn=f"arn:aws:iam::{account_id}:user/beiou")
+            if name == "AssociateAddress":
+                item["errorCode"] = "UnauthorizedOperation"
             rows.append(item)
 
         def lookup(**options):
@@ -243,12 +366,21 @@ class MultiAccountTests(unittest.TestCase):
             return {"Events": []}
 
         trail.lookup_events = Mock(side_effect=lookup)
-        result = self.execute_report(config, factory)
+        with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            result = self.execute_report(config, factory, send_mail=True)
         self.assertEqual(result, 0, self.stderr.getvalue())
+        tables = self.assert_mail_accounts(smtp, config["ACCOUNTS"])
+        self.assert_user_counts(tables[0], "beiou", [0, 0, 2, 0, 0, 1, 0])
+        self.assert_user_counts(tables[0], "hhjgx", [0, 0, 0, 0, 0, 1, 0])
+        self.assert_user_counts(tables[0], "DeployRole", [0, 0, 0, 0, 0, 2, 0])
+        self.assertIn("角色", next(row[0] for row in tables[0]["rows"] if "DeployRole" in row[0]))
+        self.assertNotIn("session-one", smtp.call_args.kwargs["html_body"])
+        self.assertNotIn("session-two", smtp.call_args.kwargs["html_body"])
         archive = Path(config["OUTPUT_DIRECTORY"]) / account_id / "2026-11-04"
         structured = json.loads((archive / "report.json").read_text(encoding="utf-8"))
         self.assertEqual({row["actor"]: row["total"] for row in structured["actors"]},
-                         {"beiou": 1, "hhjgx": 1, "DeployRole": 2})
+                         {"beiou": 3, "hhjgx": 1, "DeployRole": 2})
+        self.assertEqual(structured["metadata"]["failed_or_partial"], 2)
         pdf = archive / f"{account_id}-2026-11-04-aws操作审计.pdf"
         reader = PdfReader(pdf)
         self.assertEqual(len(reader.pages), 1)
@@ -279,9 +411,15 @@ class MultiAccountTests(unittest.TestCase):
             values = records if options["LookupAttributes"][0]["AttributeKey"] == "ReadOnly" else []
             return {"Events": [{"EventId": item["eventID"], "CloudTrailEvent": json.dumps(item)} for item in values]}
         trail.lookup_events = Mock(side_effect=lookup)
-        with patch("audit_mail.send_reports") as smtp, patch("lark_notify._send_payload") as lark:
-            self.assertEqual(self.execute_report(config, factory), 0, self.stderr.getvalue())
-        smtp.assert_not_called()
+        with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp, \
+             patch("lark_notify._send_payload") as lark:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 0, self.stderr.getvalue())
+        smtp.assert_called_once()
+        tables = self.assert_mail_accounts(smtp, config["ACCOUNTS"])
+        self.assert_user_counts(tables[0], "beiou", [0] * 7)
+        self.assert_user_counts(tables[0], "hhjgx", [0] * 7)
+        self.assertNotIn("PutDashboard", smtp.call_args.kwargs["html_body"])
+        self.assertNotIn(EVENT_SECRET, smtp.call_args.kwargs["html_body"])
         lark.assert_not_called()
         archive = Path(config["OUTPUT_DIRECTORY"]) / account_id / "2026-11-04"
         report = json.loads((archive / "report.json").read_text(encoding="utf-8"))
@@ -294,6 +432,7 @@ class MultiAccountTests(unittest.TestCase):
         for row in report["actor_events"]:
             self.assertEqual(row["event_label"], "保存 CloudWatch 监控仪表盘配置（新建或整体覆盖）")
         pdf = archive / f"{account_id}-2026-11-04-aws操作审计.pdf"
+        self.assertIn(pdf, smtp.call_args.args[1])
         text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
         for expected in ("beiou", "hhjgx", "用户操作与事件汇总", "CloudWatch", "整体覆盖"):
             self.assertIn(expected, text)
@@ -352,6 +491,14 @@ class MultiAccountTests(unittest.TestCase):
         smtp.assert_called_once()
         self.assertEqual(len(smtp.call_args.args[1]), 2)
         self.assertIn("不完整", smtp.call_args.kwargs["subject"])
+        html_body = smtp.call_args.kwargs["html_body"]
+        self.assertEqual(len(MailTables(html_body).tables), 1)
+        for body in (smtp.call_args.args[2], html_body):
+            for selected in accounts:
+                self.assertIn(selected["ACCOUNT_ID"], body)
+            self.assertIn("查询状态：不完整", body)
+            self.assertIn("本账号无报告事件", body)
+        self.assert_user_counts(MailTables(html_body).tables[0], "hhjgx", [0, 0, 0, 0, 0, 1, 0])
         failed = json.loads((Path(config["OUTPUT_DIRECTORY"]) / accounts[0]["ACCOUNT_ID"] / "2026-11-04/report.json").read_text(encoding="utf-8"))
         healthy = json.loads((Path(config["OUTPUT_DIRECTORY"]) / accounts[1]["ACCOUNT_ID"] / "2026-11-04/report.json").read_text(encoding="utf-8"))
         self.assertFalse(failed["metadata"]["complete"])
@@ -500,8 +647,11 @@ class MultiAccountTests(unittest.TestCase):
         self.assertEqual(factory.call_count, 1)
         smtp.assert_called_once()
         self.assertEqual(len(smtp.call_args.args[1]), 1)
+        self.assert_mail_accounts(smtp, [accounts[0]])
         self.assertNotIn(accounts[1]["ACCOUNT_ID"], smtp.call_args.args[2])
         self.assertNotIn(accounts[1]["TAG"], smtp.call_args.args[2])
+        self.assertNotIn(accounts[1]["ACCOUNT_ID"], smtp.call_args.kwargs["html_body"])
+        self.assertNotIn(accounts[1]["TAG"], smtp.call_args.kwargs["html_body"])
         self.assertFalse((Path(config["OUTPUT_DIRECTORY"]) / accounts[1]["ACCOUNT_ID"]).exists())
 
     def test_unfinished_window_is_rejected_before_resolving_any_aws_credentials(self):
