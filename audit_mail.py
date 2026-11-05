@@ -194,7 +194,7 @@ def load_mail_config(path, require_complete=True):
     return result
 
 
-def send_reports(config, attachments, body, subject=None):
+def send_reports(config, attachments, body, subject=None, *, html_body=None):
     """Submit PDF attachments once; SMTP acceptance is not inbox delivery."""
     config = validate_mail_config(config)
     host, port = config["SMTP_HOST"], config["SMTP_PORT"]
@@ -203,6 +203,8 @@ def send_reports(config, attachments, body, subject=None):
     envelope = config["MAIL_RECIPIENTS"] + config["MAIL_CC"]
     if not isinstance(body, str):
         raise ValueError("邮件正文必须为字符串")
+    if html_body is not None and not isinstance(html_body, str):
+        raise ValueError("HTML 邮件正文必须为字符串")
     if not isinstance(attachments, (list, tuple)) or not attachments:
         raise ValueError("邮件至少需要一个 PDF 附件")
     message = EmailMessage()
@@ -214,6 +216,8 @@ def send_reports(config, attachments, body, subject=None):
     message["Date"] = formatdate(localtime=False, usegmt=True)
     message["Message-ID"] = make_msgid()
     message.set_content(body)
+    if html_body is not None:
+        message.add_alternative(html_body, subtype="html")
     names = set()
     for item in attachments:
         path = Path(item)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -169,12 +170,8 @@ def _mail_window(meta):
     return tuple(stamps)
 
 
-def message_body(reports, report_url=""):
-    """Render one shared introduction and TAG/account list for all attachments.
-
-    The legacy URL argument is ignored. Only metadata is read; raw events,
-    transport errors and credentials never enter the message.
-    """
+def _message_intro(reports):
+    """Render one shared introduction from the metadata display whitelist."""
     reports = [reports] if isinstance(reports, dict) else reports
     if not isinstance(reports, list) or not reports:
         raise ValueError("邮件正文需要至少一份账号报告。")
@@ -197,6 +194,31 @@ def message_body(reports, report_url=""):
     if any(meta.get("offline") for meta in metadata):
         lines.append("离线输入报告；未向 AWS 验证数据完整性。")
     return "\n".join(lines)
+
+
+def message_body(reports, report_url=""):
+    """Plain-text introduction and per-account user/resource tables.
+
+    The legacy URL argument is ignored. Only metadata and precomputed counts
+    are displayed; event request bodies and responses are never read.
+    """
+    from audit_mail_summary import render_resource_tables_text
+    return (_message_intro(reports) + "\n\n按用户统计资源操作数量（API 调用次数，含失败请求）\n\n"
+            + render_resource_tables_text(reports))
+
+
+def message_body_html(reports):
+    """HTML email body with the same introduction and escaped count tables."""
+    from audit_mail_summary import render_resource_tables_html
+    intro = html.escape(_message_intro(reports)).replace("\n", "<br>\n")
+    return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1"></head>'
+            '<body style="margin:0;padding:24px;color:#18304d;background:#fff;'
+            'font-family:Arial,Microsoft YaHei,sans-serif;line-height:1.6">'
+            '<div>' + intro + '</div>'
+            '<h2 style="margin:24px 0 8px;font-size:18px">按用户统计资源操作数量</h2>'
+            '<p style="margin:0 0 16px">按 API 调用次数计，包含失败请求。</p>'
+            + render_resource_tables_html(reports) + '</body></html>')
 
 
 def deliver_reports(reports, pdf_paths, config, state_dir, *, automatic=False,
@@ -236,6 +258,7 @@ def deliver_reports(reports, pdf_paths, config, state_dir, *, automatic=False,
                        str(meta.get("window_end_utc_exclusive", ""))] for meta in metadata)
     key = hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode()).hexdigest()
     body = message_body(reports)
+    html_body = message_body_html(reports)
     subject = str(config.get("MAIL_SUBJECT", "AWS账号操作审计日报")) + " " + report_day
     if not complete:
         subject += " [不完整]"
@@ -274,7 +297,8 @@ def deliver_reports(reports, pdf_paths, config, state_dir, *, automatic=False,
         day_entry["used"] = 1
         _save(path, state)  # A crash after this point conservatively reserves delivery.
         try:
-            delivery = send_reports(config, [Path(path) for path in pdf_paths], body, subject=subject)
+            delivery = send_reports(config, [Path(path) for path in pdf_paths], body,
+                                    subject=subject, html_body=html_body)
             if not isinstance(delivery, dict) or delivery.get("smtp_accepted") is not True:
                 raise RuntimeError("SMTP result is not an acceptance receipt")
         except MailDeliveryError as exc:

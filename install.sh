@@ -246,7 +246,7 @@ if ((UPDATE)); then
     SOURCE_DIR=$WORK_DIR/source
 fi
 
-RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_actions.py audit_event_catalog.py aws-event-translations.json audit_identity_summary.py audit_config.py audit_schedule.py audit_mail.py audit_mail_delivery.py
+RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_actions.py audit_event_catalog.py aws-event-translations.json audit_identity_summary.py audit_resource_summary.py audit_mail_summary.py audit_config.py audit_schedule.py audit_mail.py audit_mail_delivery.py
     audit_pdf.py audit_alerts.py lark_notify.py requirements.txt install.sh README.md
     iam-policy.json iam-policy-single-region.json aws-audit-config.example.json
     deploy/install_support.py deploy/run_scheduled.py)
