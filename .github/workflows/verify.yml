@@ -30,13 +30,35 @@ jobs:
           test_audit_mail test_audit_mail_delivery test_audit_pdf
           test_audit_config test_audit_multi test_audit_alerts test_audit_schedule test_audit_actions
           test_audit_identity_summary test_audit_event_catalog test_audit_resource_summary test_audit_mail_summary
+          test_docker_runtime test_docker_config test_docker_install
       - name: Bash syntax and deployment preview
         run: |
           bash -n install.sh
           bash install.sh --dry-run --python python
+          bash -n install-docker.sh
+          bash install-docker.sh --dry-run
       - name: Install syntax-check tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends systemd
       - name: Validate generated systemd units
         run: python deploy/verify_linux.py
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install verification dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check Docker tools
+        run: |
+          docker version
+          docker compose version
+      - name: Build and exercise production image offline
+        run: python deploy/verify_docker.py

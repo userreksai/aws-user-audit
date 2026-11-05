@@ -1,0 +1,25 @@
+# Deny by default, including Git-ignored private files and unrelated projects.
+**
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!aws_daily_audit.py
+!aws_audit_multi.py
+!audit_actions.py
+!audit_alerts.py
+!audit_config.py
+!audit_event_catalog.py
+!audit_identity_summary.py
+!audit_mail.py
+!audit_mail_delivery.py
+!audit_mail_summary.py
+!audit_pdf.py
+!audit_resource_summary.py
+!audit_schedule.py
+!lark_notify.py
+!aws-event-translations.json
+!aws-audit-config.example.json
+!deploy/
+deploy/**
+!deploy/docker_runtime.py
+!deploy/docker_config.py
