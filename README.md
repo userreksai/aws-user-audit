@@ -23,6 +23,18 @@ PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行
 
 ## 安装和更新
 
+需要 Docker 部署时，使用独立的 [Docker 部署说明](DOCKER.md) 和 `install-docker.sh`。Docker 支持不会修改、停用或替换现有 systemd、cron、Nginx；配置只读挂载，报告与状态持久化，容器内部按北京时间定时。已有配置不覆盖，首次缺配置仅初始化完整模板并提示填写。
+
+```bash
+cd /opt/aws-user-audit-src
+sudo git pull --ff-only
+sudo bash install-docker.sh
+# 若启用账号使用 AWS_PROFILE，改用：
+# sudo bash install-docker.sh --profile-dir /root/.aws
+```
+
+以下仍为原有宿主机 systemd 部署方式，可继续使用。
+
 已有源码目录先更新，执行安装器：
 
 ```bash

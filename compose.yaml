@@ -1,0 +1,43 @@
+services:
+  audit:
+    image: ${AUDIT_IMAGE:-aws-user-audit:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    user: "${AUDIT_UID:-0}:${AUDIT_GID:-0}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=32m,mode=1777
+    volumes:
+      - type: bind
+        source: ${AUDIT_CONFIG_PATH:-/usr/local/aws-user-audit/aws-audit-config.json}
+        target: /usr/local/aws-user-audit/aws-audit-config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${AUDIT_REPORTS_DIR:-/usr/local/aws-user-audit/reports}
+        target: ${AUDIT_CONTAINER_REPORTS_DIR:-/usr/local/aws-user-audit/reports}
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${AUDIT_STATE_DIR:-/usr/local/aws-user-audit/.state}
+        target: ${AUDIT_CONTAINER_STATE_DIR:-/usr/local/aws-user-audit/.state}
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
