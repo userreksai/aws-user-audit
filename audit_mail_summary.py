@@ -22,6 +22,7 @@ _IDENTITY_LABELS = {
 _CELL_STYLE = "border:1px solid #cbd5e1;padding:8px;text-align:right;vertical-align:top;"
 _NAME_STYLE = "border:1px solid #cbd5e1;padding:8px;text-align:left;vertical-align:top;word-break:break-word;"
 _HEAD_STYLE = "border:1px solid #cbd5e1;padding:8px;background-color:#f1f5f9;text-align:left;vertical-align:top;"
+_NO_OPERATIONS = "本账号在上述七类资源中无操作。"
 
 
 def _line(value):
@@ -63,24 +64,30 @@ def _counts(row):
     return [str(values[column]) for column in RESOURCE_COLUMNS]
 
 
+def _resource_rows(summary):
+    """Select matching identities for mail without changing the full summary."""
+    return [row for row in summary["rows"] if any(row["counts"][column] > 0 for column in RESOURCE_COLUMNS)]
+
+
 def _text_cell(value):
     # Escaped pipes keep a label from masquerading as additional table columns.
     return value.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def render_resource_tables_text(reports):
-    """Return all accounts and identities as readable pipe-separated tables."""
+    """Return all accounts and matching identities as pipe-separated tables."""
     sections = []
     for heading, status, summary in _sections(reports):
         lines = [heading, status]
+        rows = _resource_rows(summary) if summary["available"] else []
         if not summary["available"]:
             lines.append("资源操作统计不可用；请使用新版程序重新生成报告。")
-        elif not summary["rows"]:
-            lines.append("本账号无报告事件。")
+        elif not rows:
+            lines.append(_NO_OPERATIONS)
         else:
             lines.append(" | ".join(["具体用户", *RESOURCE_COLUMNS]))
             lines.append(" | ".join(["---"] * (len(RESOURCE_COLUMNS) + 1)))
-            for row in summary["rows"]:
+            for row in rows:
                 lines.append(" | ".join([_text_cell(_identity(row)), *_counts(row)]))
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
@@ -93,17 +100,18 @@ def render_resource_tables_html(reports):
         parts = ['<div style="margin:24px 0;">',
                  '<h3 style="margin:0 0 8px;font-size:16px;">' + escape(heading) + '</h3>',
                  '<p style="margin:0 0 12px;">' + escape(status) + '</p>']
+        rows = _resource_rows(summary) if summary["available"] else []
         if not summary["available"]:
             parts.append('<p style="margin:0;">资源操作统计不可用；请使用新版程序重新生成报告。</p>')
-        elif not summary["rows"]:
-            parts.append('<p style="margin:0;">本账号无报告事件。</p>')
+        elif not rows:
+            parts.append('<p style="margin:0;">' + _NO_OPERATIONS + '</p>')
         else:
             parts.append('<table style="border-collapse:collapse;width:100%;font-size:13px;">')
             parts.append('<thead><tr>')
             for column in ["具体用户", *RESOURCE_COLUMNS]:
                 parts.append('<th scope="col" style="' + _HEAD_STYLE + '">' + escape(column) + '</th>')
             parts.append('</tr></thead><tbody>')
-            for row in summary["rows"]:
+            for row in rows:
                 parts.append('<tr><td style="' + _NAME_STYLE + '">' + escape(_identity(row)) + '</td>')
                 for value in _counts(row):
                     parts.append('<td style="' + _CELL_STYLE + '">' + escape(value) + '</td>')

@@ -308,7 +308,7 @@ class MultiAccountTests(unittest.TestCase):
         smtp.assert_called_once()
         for body in (smtp.call_args.args[2], smtp.call_args.kwargs["html_body"]):
             self.assertIn(selected["ACCOUNT_ID"] + "-" + selected["TAG"], body)
-            self.assertIn("本账号无报告事件", body)
+            self.assertIn("本账号在上述七类资源中无操作。", body)
             self.assertIn("所列查询完成", body)
             self.assertNotIn("统计不可用", body)
         self.assertEqual(MailTables(smtp.call_args.kwargs["html_body"]).tables, [])
@@ -316,6 +316,85 @@ class MultiAccountTests(unittest.TestCase):
         self.assertTrue(smtp.call_args.args[1][0].read_bytes().startswith(b"%PDF-"))
         self.assertIn(selected["ACCOUNT_ID"], "\n".join(page.extract_text() or ""
                       for page in PdfReader(smtp.call_args.args[1][0]).pages))
+
+    def test_mail_hides_zero_resource_identities_but_keeps_iam_events_and_all_pdf_users(self):
+        for with_resources in (True, False):
+            with self.subTest(with_resources=with_resources):
+                selected = account(TAG="资源过滤", REGIONS=["eu-north-1", "us-east-1"])
+                config, _ = self.config([selected], OUTPUT_DIRECTORY=f"filtered-{with_resources}",
+                                        STATE_DIRECTORY=f".filtered-state-{with_resources}")
+                factory, sessions = self.factory([selected])
+                account_id = selected["ACCOUNT_ID"]
+                rows = []
+
+                def add(name, source, actor, *, kind="IAMUser", region="eu-north-1", failed=False):
+                    item = event(account_id, region)
+                    item.update(eventID=f"filter-{len(rows)}", eventName=name, eventSource=source,
+                                requestParameters={})
+                    identity = {"type": kind, "userName": actor,
+                                "arn": f"arn:aws:iam::{account_id}:user/{actor}"}
+                    if kind == "Root":
+                        identity = {"type": kind, "arn": f"arn:aws:iam::{account_id}:root"}
+                    elif kind == "AssumedRole":
+                        identity = {"type": kind,
+                                    "arn": f"arn:aws:sts::{account_id}:assumed-role/{actor}/session",
+                                    "sessionContext": {"sessionIssuer": {"userName": actor,
+                                        "arn": f"arn:aws:iam::{account_id}:role/{actor}"}}}
+                    elif kind == "Unknown":
+                        identity = {"type": kind, "invokedBy": actor}
+                    item["userIdentity"] = identity
+                    if failed:
+                        item.update(errorCode="AccessDenied", errorMessage="Fictional denied request")
+                    rows.append(item)
+
+                if with_resources:
+                    add("CreateSecurityGroup", "ec2.amazonaws.com", "Jeterry")
+                    add("CreateSecurityGroup", "ec2.amazonaws.com", "Jeterry", failed=True)
+                add("CreateUser", "iam.amazonaws.com", "jeterry", region="us-east-1")
+                add("SendMessage", "q.amazonaws.com", "ZeroRole", kind="AssumedRole")
+                add("ConsoleLogin", "signin.amazonaws.com", "Root", kind="Root", region="us-east-1")
+                add("ConsoleLogin", "signin.amazonaws.com", "ec2.amazonaws.com", kind="Unknown",
+                    region="us-east-1")
+
+                def lookup(region, **options):
+                    matches = [item for item in rows if item["awsRegion"] == region]
+                    if options["LookupAttributes"][0]["AttributeKey"] != "ReadOnly":
+                        matches = []
+                    return {"Events": [{"EventId": item["eventID"], "CloudTrailEvent": json.dumps(item)}
+                                       for item in matches]}
+
+                session = sessions[selected["AWS_ACCESS_KEY_ID"]]
+                for region in selected["REGIONS"]:
+                    trail = session.client("cloudtrail", region_name=region)
+                    trail.lookup_events = Mock(side_effect=lambda region=region, **opts: lookup(region, **opts))
+                with patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+                    self.assertEqual(self.execute_report(config, factory, send_mail=True), 0, self.stderr.getvalue())
+                html = smtp.call_args.kwargs["html_body"]
+                tables = MailTables(html).tables
+                if with_resources:
+                    self.assertEqual(len(tables), 1)
+                    self.assertEqual(tables[0]["rows"][1:], [["Jeterry", "2", "0", "0", "0", "0", "0", "0"]])
+                else:
+                    self.assertEqual(tables, [])
+                for body in (html, smtp.call_args.args[2]):
+                    self.assertIn(account_id, body)
+                    self.assertIn(selected["TAG"], body)
+                    for hidden in ("jeterry", "ZeroRole", "Root", "ec2.amazonaws.com"):
+                        self.assertNotIn(hidden, body)
+                    if not with_resources:
+                        self.assertIn("本账号在上述七类资源中无操作。", body)
+                self.assertEqual(len(smtp.call_args.args[1]), 1)
+                archive = Path(config["OUTPUT_DIRECTORY"]) / account_id / "2026-11-04"
+                structured = json.loads((archive / "report.json").read_text(encoding="utf-8"))
+                self.assertEqual(structured["metadata"]["total"], len(rows))
+                self.assertEqual(structured["metadata"]["failed_or_partial"], int(with_resources))
+                iam = next(item for item in structured["actor_events"] if item["source"] == "iam.amazonaws.com")
+                self.assertEqual((iam["actor"], iam["identity_type"], iam["event_name"], iam["total"]),
+                                 ("jeterry", "IAMUser", "CreateUser", 1))
+                pdf = archive / f"{account_id}-2026-11-04-aws操作审计.pdf"
+                text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+                for kept in ("jeterry", "ZeroRole", "Root", "ec2.amazonaws.com"):
+                    self.assertIn(kept, "".join(text.split()))
 
     def test_identity_mismatch_stops_region_discovery_and_cloudtrail_before_reading_other_account(self):
         selected = account(REGIONS="all")
@@ -415,9 +494,12 @@ class MultiAccountTests(unittest.TestCase):
              patch("lark_notify._send_payload") as lark:
             self.assertEqual(self.execute_report(config, factory, send_mail=True), 0, self.stderr.getvalue())
         smtp.assert_called_once()
-        tables = self.assert_mail_accounts(smtp, config["ACCOUNTS"])
-        self.assert_user_counts(tables[0], "beiou", [0] * 7)
-        self.assert_user_counts(tables[0], "hhjgx", [0] * 7)
+        self.assertEqual(MailTables(smtp.call_args.kwargs["html_body"]).tables, [])
+        for body in (smtp.call_args.args[2], smtp.call_args.kwargs["html_body"]):
+            self.assertIn(account_id, body)
+            self.assertIn("本账号在上述七类资源中无操作。", body)
+            self.assertNotIn("beiou", body)
+            self.assertNotIn("hhjgx", body)
         self.assertNotIn("PutDashboard", smtp.call_args.kwargs["html_body"])
         self.assertNotIn(EVENT_SECRET, smtp.call_args.kwargs["html_body"])
         lark.assert_not_called()
@@ -497,7 +579,7 @@ class MultiAccountTests(unittest.TestCase):
             for selected in accounts:
                 self.assertIn(selected["ACCOUNT_ID"], body)
             self.assertIn("查询状态：不完整", body)
-            self.assertIn("本账号无报告事件", body)
+            self.assertIn("本账号在上述七类资源中无操作。", body)
         self.assert_user_counts(MailTables(html_body).tables[0], "hhjgx", [0, 0, 0, 0, 0, 1, 0])
         failed = json.loads((Path(config["OUTPUT_DIRECTORY"]) / accounts[0]["ACCOUNT_ID"] / "2026-11-04/report.json").read_text(encoding="utf-8"))
         healthy = json.loads((Path(config["OUTPUT_DIRECTORY"]) / accounts[1]["ACCOUNT_ID"] / "2026-11-04/report.json").read_text(encoding="utf-8"))
