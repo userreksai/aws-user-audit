@@ -14,6 +14,7 @@
 !audit_mail_delivery.py
 !audit_mail_summary.py
 !audit_pdf.py
+!audit_publication.py
 !audit_resource_summary.py
 !audit_schedule.py
 !lark_notify.py

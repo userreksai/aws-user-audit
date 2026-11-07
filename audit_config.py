@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import posixpath
 import re
 import unicodedata
+from urllib.parse import urlsplit
 
 DEFAULT_INSTALL_DIR = "/usr/local/aws-user-audit"
 
@@ -29,6 +31,55 @@ def _unique(pairs):
 
 def _constant(value):
     raise ValueError("非 JSON 数值常量")
+
+
+def _overlap(first, second):
+    return first == second or first in second.parents or second in first.parents
+
+
+def _publish_path(value, source):
+    """Keep the Nginx-readable tree separate from private inputs and system trees."""
+    text = _text(value, "PUBLISH_DIRECTORY", required=True)
+    # Apply the Linux deployment boundary even in Windows-side configuration tests.
+    def safe_tree(logical):
+        if (logical in {"/", "/usr", "/usr/local", "/var", "/var/lib", "/opt", "/srv", "/home", "/root", "/tmp"}
+                or any(logical == prefix or logical.startswith(prefix + "/")
+                       for prefix in ("/etc", "/proc", "/sys", "/dev", "/bin", "/sbin", "/lib", "/lib64",
+                                      "/boot", "/run", "/app", "/root/.aws", "/usr/bin", "/usr/sbin",
+                                      "/usr/lib", "/usr/lib64", "/usr/share", "/usr/local/bin", "/usr/local/sbin"))):
+            raise ValueError("PUBLISH_DIRECTORY 必须使用独立网页目录，不能使用系统敏感目录")
+    if text.startswith("/"):
+        safe_tree(posixpath.normpath(text))
+    item = Path(text).expanduser()
+    candidate = item if item.is_absolute() else source.parent / item
+    for component in (candidate, *candidate.parents):
+        if component.is_symlink() or (hasattr(component, "is_junction") and component.is_junction()):
+            raise ValueError("PUBLISH_DIRECTORY 及其父目录不能为符号链接或 junction")
+    destination = candidate.resolve()
+    safe_tree(destination.as_posix())
+    if destination == Path(destination.anchor):
+        raise ValueError("PUBLISH_DIRECTORY 必须使用独立网页目录")
+    if destination.exists() and not destination.is_dir():
+        raise ValueError("PUBLISH_DIRECTORY 必须为网页目录")
+    return str(destination)
+
+
+def _report_url(value):
+    value = _text(value, "REPORT_URL")
+    if not value:
+        return ""
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment
+                or any(char.isspace() or char in "{}<>" or ord(char) in {34, 39, 92, 96}
+                       or unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in value)):
+            raise ValueError
+        parsed.port
+    except (ValueError, TypeError):
+        raise ValueError("REPORT_URL 必须为不含凭据、查询参数、片段或模板的 HTTP/HTTPS 网页地址") from None
+    return value
 
 
 def load_config(path, *, require_mail=False):
@@ -71,9 +122,14 @@ def load_config(path, *, require_mail=False):
     result["AUTO_MAIL_MAX_PER_DAY"] = raw.get("AUTO_MAIL_MAX_PER_DAY", 1)
     if type(result["AUTO_MAIL_MAX_PER_DAY"]) is not int or result["AUTO_MAIL_MAX_PER_DAY"] not in (0, 1):
         raise ValueError("AUTO_MAIL_MAX_PER_DAY 仅支持 0 或 1")
-    # Legacy web fields are accepted as inert compatibility data. Multi-account
-    # reporting no longer publishes HTML or needs a report URL.
-    from lark_notify import validate_webhook_url
+    from lark_notify import DEFAULT_REPORT_URL, validate_webhook_url
+    result["HTML_REPORT_ENABLED"] = raw.get("HTML_REPORT_ENABLED", True)
+    result["LARK_REPORT_ENABLED"] = raw.get("LARK_REPORT_ENABLED", False)
+    for key in ("HTML_REPORT_ENABLED", "LARK_REPORT_ENABLED"):
+        if type(result[key]) is not bool:
+            raise ValueError(key + " 必须为 true 或 false")
+    result["PUBLISH_DIRECTORY"] = _publish_path(raw.get("PUBLISH_DIRECTORY", "index"), source)
+    result["REPORT_URL"] = _report_url(raw.get("REPORT_URL", DEFAULT_REPORT_URL))
     result["LARK_ALERTS_ENABLED"] = raw.get("LARK_ALERTS_ENABLED", False)
     if type(result["LARK_ALERTS_ENABLED"]) is not bool:
         raise ValueError("LARK_ALERTS_ENABLED 必须为 true 或 false")
@@ -84,8 +140,12 @@ def load_config(path, *, require_mail=False):
             validate_webhook_url(result["LARK_WEBHOOK_URL"])
         except ValueError:
             raise ValueError("LARK_WEBHOOK_URL 必须为有效的 Lark/飞书 HTTPS 机器人地址") from None
-    elif result["LARK_ALERTS_ENABLED"]:
-        raise ValueError("开启异常告警须填写 LARK_WEBHOOK_URL")
+    elif result["LARK_ALERTS_ENABLED"] or result["LARK_REPORT_ENABLED"]:
+        raise ValueError("开启异常告警或日报通知须填写 LARK_WEBHOOK_URL")
+    if result["LARK_REPORT_ENABLED"] and not result["HTML_REPORT_ENABLED"]:
+        raise ValueError("开启 LARK_REPORT_ENABLED 须同时开启 HTML_REPORT_ENABLED")
+    if result["LARK_REPORT_ENABLED"] and not result["REPORT_URL"]:
+        raise ValueError("开启日报通知须填写 REPORT_URL")
 
     if Path(result["OUTPUT_DIRECTORY"]) == Path(result["STATE_DIRECTORY"]):
         raise ValueError("报告目录与状态目录必须分开")
@@ -93,6 +153,12 @@ def load_config(path, *, require_mail=False):
         destination = Path(result[key])
         if source == destination or destination in source.parents:
             raise ValueError(key + " 不能包含或覆盖私有配置文件")
+    publish = Path(result["PUBLISH_DIRECTORY"])
+    if _overlap(publish, source):
+        raise ValueError("PUBLISH_DIRECTORY 不能包含或覆盖私有配置文件")
+    for key in ("OUTPUT_DIRECTORY", "STATE_DIRECTORY"):
+        if _overlap(publish, Path(result[key])):
+            raise ValueError("PUBLISH_DIRECTORY 必须与 OUTPUT_DIRECTORY、STATE_DIRECTORY 分开且不能互相嵌套")
     accounts = raw.get("ACCOUNTS")
     if not isinstance(accounts, list) or not accounts:
         raise ValueError("ACCOUNTS 必须为非空账号数组")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-account CloudTrail reports, one PDF per account, one combined email."""
+"""Multi-account CloudTrail PDF mail and an atomically refreshed HTML report."""
 from __future__ import annotations
 
 import argparse
@@ -74,6 +74,7 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
     from audit_alerts import notify_issues
     from audit_mail_delivery import _locked, deliver_reports
     from audit_pdf import render_report_pdf
+    from audit_publication import notify_report, publish_latest_reports
 
     supplied_clock = now
     now = now or datetime.now(UTC)
@@ -112,6 +113,25 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
             except Exception as exc:
                 issues.append({"account_id": account, "stage": "pdf"})
                 print(f"账号 {account} 报告生成失败（{type(exc).__name__}）；其他账号继续。", file=sys.stderr)
+        if config.get("HTML_REPORT_ENABLED", True) and not no_publish:
+            try:
+                published = publish_latest_reports(reports, config.get("PUBLISH_DIRECTORY", str(archive.parent / "index")))
+                print(f"最新 HTML 报告已更新：{published}", flush=True)
+            except Exception as exc:
+                issues.append({"stage": "publish"})
+                print(f"HTML 发布失败（{type(exc).__name__}）；PDF/邮件流程继续，本次不发送日报链接。", file=sys.stderr)
+            else:
+                try:
+                    notification = notify_report(config, reports, published,
+                                                 now=supplied_clock or datetime.now(UTC))
+                except Exception:
+                    # A notification adapter must never block the existing mail flow.
+                    notification = {"sent": False, "failed": True}
+                if notification["failed"]:
+                    issues.append({"stage": "lark"})
+                    print("Lark 日报链接投递失败或未确认；HTML 和 PDF 已保留。", file=sys.stderr)
+                elif notification["sent"]:
+                    print("Lark 日报摘要和最新报告链接已发送。", flush=True)
         if send_mail:
             if len(pdfs) != len(reports):
                 issues.append({"stage": "mail"})
@@ -135,7 +155,9 @@ def run_report(config, day, *, send_mail=False, automatic_mail=False, force_rese
             return 2
         if any(item["stage"] == "pdf" for item in issues):
             return 5
-        if any(item["stage"] == "mail" for item in issues) or alert["failed"]:
+        if any(item["stage"] == "publish" for item in issues):
+            return 4
+        if any(item["stage"] in {"mail", "lark"} for item in issues) or alert["failed"]:
             return 3
         return 0
 
@@ -147,8 +169,7 @@ def main(argv=None):
     parser.add_argument("--send-mail", action="store_true", help="所有账号 PDF 合并一封邮件发送")
     parser.add_argument("--automatic-mail", action="store_true", help="应用北京时间每日最多一封的自动额度")
     parser.add_argument("--force-resend", action="store_true", help="核实历史投递后显式手动重发")
-    # Accepted for old launch commands; multi-account jobs never publish HTML.
-    parser.add_argument("--no-publish", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-publish", action="store_true", help="本次只生成私有 PDF/JSON 和邮件，不更新 HTML 或发送日报链接")
     parser.add_argument("--check-config", action="store_true", help="只校验本地配置，不调用 AWS/SMTP/Lark")
     args = parser.parse_args(argv)
     config = None

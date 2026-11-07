@@ -85,6 +85,21 @@ normalize_path() {
     printf -v "$name" '%s' "${value%/}"
 }
 
+# Nginx must be able to traverse a newly created public directory's parents.
+# Create only missing directories with 0755; never loosen an existing ancestor.
+create_public_parents() {
+    local parent=$1 index
+    local -a missing=()
+    while [[ ! -d $parent ]]; do
+        [[ ! -e $parent && ! -L $parent ]] || die 'HTML 父路径不是普通目录。'
+        missing+=("$parent")
+        parent=$(dirname -- "$parent")
+    done
+    for ((index=${#missing[@]}-1; index>=0; index--)); do
+        (umask 022; mkdir -- "${missing[$index]}") || die '无法创建 HTML 可遍历父目录。'
+    done
+}
+
 cleanup() {
     local status=$?
     trap - EXIT
@@ -137,8 +152,8 @@ if ((DRY_RUN)); then
     say '缺少配置时：完整复制模板为 0600，停止并等待填写，再次运行。'
     say "Compose project：$PROJECT；service：audit；image：$IMAGE"
     say '已有配置时：build audit → 隔离网络校验路径 → check → up -d --no-deps --force-recreate audit。'
-    say 'AUDIT_CONFIG_PATH 指向现有配置；AUDIT_REPORTS_DIR / AUDIT_STATE_DIR 按原配置解析宿主路径。'
-    say 'AUDIT_CONTAINER_REPORTS_DIR / AUDIT_CONTAINER_STATE_DIR 按固定配置路径解析容器路径。'
+    say 'AUDIT_CONFIG_PATH 指向现有配置；报告、私有状态和独立 HTML 发布目录按原配置解析宿主路径。'
+    say '容器分别挂载报告、状态和 HTML 目录；HTML 目录为 0755，供宿主 Nginx 读取。'
     [[ -z $PROFILE_DIR ]] || say '追加 compose.aws-profile.yaml，AWS profile 只读挂载到 /root/.aws。'
     ((NO_START == 0)) || say '--no-start：完成 build 和 check 后停止，不启动或替换现有容器。'
     say '安装器不直接执行日报；首次无 Docker 调度游标时等待下次；已有游标重启会按补跑规则执行最近结束窗口。'
@@ -163,7 +178,7 @@ done
 # image, build a container, inspect credentials, or start any scheduled task.
 if [[ ! -e $CONFIG_PATH ]]; then
     [[ -f $SOURCE_DIR/aws-audit-config.example.json ]] || die '缺少完整配置模板。'
-    mkdir -p -- "$(dirname -- "$CONFIG_PATH")" || die '无法创建配置目录。'
+    create_public_parents "$(dirname -- "$CONFIG_PATH")"
     (set -o noclobber; cat -- "$SOURCE_DIR/aws-audit-config.example.json" >"$CONFIG_PATH") \
         2>/dev/null || die '无法安全初始化配置，请检查目录权限并重试。'
     chmod 0600 -- "$CONFIG_PATH" || die '无法设置新配置的私有权限。'
@@ -200,8 +215,10 @@ fi
 export AUDIT_CONFIG_PATH=$CONFIG_PATH
 export AUDIT_REPORTS_DIR=$DATA_DIR/reports
 export AUDIT_STATE_DIR=$DATA_DIR/.state
+export AUDIT_PUBLISH_DIR=$DATA_DIR/index
 export AUDIT_CONTAINER_REPORTS_DIR=/usr/local/aws-user-audit/reports
 export AUDIT_CONTAINER_STATE_DIR=/usr/local/aws-user-audit/.state
+export AUDIT_CONTAINER_PUBLISH_DIR=/usr/local/aws-user-audit/index
 COMPOSE=(docker compose --project-name "$PROJECT" --project-directory "$SOURCE_DIR" -f "$SOURCE_DIR/compose.yaml")
 if [[ -n $PROFILE_DIR ]]; then
     [[ -f $SOURCE_DIR/compose.aws-profile.yaml ]] || die '缺少 AWS profile 的 Compose overlay。'
@@ -222,37 +239,50 @@ fi
 
 AUDIT_REPORTS_DIR=
 AUDIT_STATE_DIR=
+AUDIT_PUBLISH_DIR=
 AUDIT_CONTAINER_REPORTS_DIR=
 AUDIT_CONTAINER_STATE_DIR=
+AUDIT_CONTAINER_PUBLISH_DIR=
 AUDIT_REQUIRES_PROFILE=
 AUDIT_FONT_SOURCE=
 AUDIT_CONTAINER_FONT_PATH=
 declare -A PLAN_KEYS=()
 while IFS=$'\t' read -r key value extra || [[ -n ${key:-} ]]; do
     case $key in
-        AUDIT_REPORTS_DIR|AUDIT_STATE_DIR|AUDIT_CONTAINER_REPORTS_DIR|AUDIT_CONTAINER_STATE_DIR|AUDIT_REQUIRES_PROFILE|AUDIT_FONT_SOURCE|AUDIT_CONTAINER_FONT_PATH)
+        AUDIT_REPORTS_DIR|AUDIT_STATE_DIR|AUDIT_PUBLISH_DIR|AUDIT_CONTAINER_REPORTS_DIR|AUDIT_CONTAINER_STATE_DIR|AUDIT_CONTAINER_PUBLISH_DIR|AUDIT_REQUIRES_PROFILE|AUDIT_FONT_SOURCE|AUDIT_CONTAINER_FONT_PATH)
             [[ -n $value && -z ${extra:-} && -z ${PLAN_KEYS[$key]:-} ]] || die '容器路径计划格式无效。'
             printf -v "$key" '%s' "$value"; PLAN_KEYS[$key]=1 ;;
         *) die '容器路径计划包含未知字段。' ;;
     esac
 done <"$PLAN_FILE"
-[[ ( ${#PLAN_KEYS[@]} == 5 || ${#PLAN_KEYS[@]} == 7 ) && $AUDIT_REQUIRES_PROFILE =~ ^[01]$ ]] \
+[[ ( ${#PLAN_KEYS[@]} == 7 || ${#PLAN_KEYS[@]} == 9 ) && $AUDIT_REQUIRES_PROFILE =~ ^[01]$ ]] \
     || die '容器路径计划不完整。'
-for setting in AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR; do
+for setting in AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_PUBLISH_DIR AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR AUDIT_CONTAINER_PUBLISH_DIR; do
     validate_path "${!setting}"
     dedicated_directory "${!setting}"
 done
 normalize_path AUDIT_REPORTS_DIR
 normalize_path AUDIT_STATE_DIR
-for setting in AUDIT_REPORTS_DIR AUDIT_STATE_DIR; do
+normalize_path AUDIT_PUBLISH_DIR
+for setting in AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_PUBLISH_DIR; do
     directory=${!setting}
     safe_writable_directory "$directory"
     [[ $CONFIG_PATH != "$directory" && $CONFIG_PATH != "$directory/"* ]] \
-        || die '报告/状态目录不能包含或覆盖私有配置。'
+        || die '报告、状态或 HTML 目录不能包含或覆盖私有配置。'
 done
 [[ $AUDIT_REPORTS_DIR != "$AUDIT_STATE_DIR" \
     && $AUDIT_REPORTS_DIR != "$AUDIT_STATE_DIR/"* && $AUDIT_STATE_DIR != "$AUDIT_REPORTS_DIR/"* ]] \
     || die '报告目录与状态目录必须是独立、不嵌套的目录。'
+for private_directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR"; do
+    [[ $AUDIT_PUBLISH_DIR != "$private_directory" \
+        && $AUDIT_PUBLISH_DIR != "$private_directory/"* && $private_directory != "$AUDIT_PUBLISH_DIR/"* ]] \
+        || die 'HTML 目录必须与私有报告和状态目录分开且不能互相嵌套。'
+done
+for private_directory in "$AUDIT_CONTAINER_REPORTS_DIR" "$AUDIT_CONTAINER_STATE_DIR"; do
+    [[ $AUDIT_CONTAINER_PUBLISH_DIR != "$private_directory" \
+        && $AUDIT_CONTAINER_PUBLISH_DIR != "$private_directory/"* && $private_directory != "$AUDIT_CONTAINER_PUBLISH_DIR/"* ]] \
+        || die '容器 HTML 目录必须与私有报告和状态目录分开且不能互相嵌套。'
+done
 if [[ $AUDIT_REQUIRES_PROFILE == 1 && -z $PROFILE_DIR ]]; then
     die '启用的 AWS 账号配置了 AWS_PROFILE。请加 --profile-dir /root/.aws（或真实凭据目录），以只读挂载到容器 /root/.aws 后重跑。'
 fi
@@ -263,7 +293,7 @@ if [[ -n $AUDIT_FONT_SOURCE || -n $AUDIT_CONTAINER_FONT_PATH ]]; then
     [[ -f $AUDIT_FONT_SOURCE && -r $AUDIT_FONT_SOURCE && ! -L $AUDIT_FONT_SOURCE ]] \
         || die 'PDF_FONT_PATH 的宿主字体必须是可读、非符号链接的普通文件。'
     normalize_path AUDIT_FONT_SOURCE
-    for directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR"; do
+    for directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR" "$AUDIT_PUBLISH_DIR"; do
         [[ $AUDIT_FONT_SOURCE != "$directory" && $AUDIT_FONT_SOURCE != "$directory/"* ]] \
             || die 'PDF_FONT_PATH 不能位于可写的报告或状态目录内。'
     done
@@ -271,14 +301,17 @@ if [[ -n $AUDIT_FONT_SOURCE || -n $AUDIT_CONTAINER_FONT_PATH ]]; then
     export AUDIT_FONT_SOURCE AUDIT_CONTAINER_FONT_PATH
     COMPOSE+=(-f "$SOURCE_DIR/compose.font.yaml")
 fi
-export AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR
-for directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR"; do
+export AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_PUBLISH_DIR AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR AUDIT_CONTAINER_PUBLISH_DIR
+# Prepare the public parent chain before private outputs create any shared
+# missing ancestors under the installer's private 077 umask.
+create_public_parents "$(dirname -- "$AUDIT_PUBLISH_DIR")"
+for directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR" "$AUDIT_PUBLISH_DIR"; do
     if [[ -e $directory ]]; then
         [[ -d $directory && $(stat -c '%u' -- "$directory") == "$AUDIT_UID" ]] \
-            || die '现有报告/状态目录须属于配置文件所有者，请核对目录所有权后重跑；安装器不会改写旧目录所有权。'
+            || die '现有报告、状态及 HTML 目录须属于配置文件所有者，请核对目录所有权后重跑；安装器不会改写旧目录所有权。'
     fi
 done
-for directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR"; do
+for directory in "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR" "$AUDIT_PUBLISH_DIR"; do
     if [[ ! -d $directory ]]; then
         mkdir -p -- "$directory" || die '无法创建报告或状态目录。'
         if [[ $(stat -c '%u:%g' -- "$directory") != "$AUDIT_UID:$AUDIT_GID" ]]; then
@@ -289,6 +322,7 @@ done
 # Only these two directory entries are restricted. Existing files, descendants,
 # config bytes/ownership, and the parent data directory are never recursively changed.
 chmod 0700 -- "$AUDIT_REPORTS_DIR" "$AUDIT_STATE_DIR" || die '无法设置报告/状态目录权限。'
+chmod 0755 -- "$AUDIT_PUBLISH_DIR" || die '无法设置 HTML 目录读取权限。'
 run_logged 'Compose 配置检查失败，未启动或更新容器。' "${COMPOSE[@]}" config --quiet
 run_logged '容器配置检查失败；请检查私有配置、挂载权限及 AWS profile 文件。未启动或更新容器。' \
     "${COMPOSE[@]}" run --rm --no-deps -T audit check-config --config "$CONTAINER_CONFIG"
@@ -312,8 +346,8 @@ write_env() {
     value=${value//\'/\\\'}
     printf "%s='%s'\n" "$name" "$value" >>"$ENV_STAGE"
 }
-for setting in COMPOSE_PROJECT_NAME COMPOSE_FILE AUDIT_IMAGE AUDIT_UID AUDIT_GID AUDIT_CONFIG_PATH AUDIT_REPORTS_DIR AUDIT_STATE_DIR \
-    AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR; do
+for setting in COMPOSE_PROJECT_NAME COMPOSE_FILE AUDIT_IMAGE AUDIT_UID AUDIT_GID AUDIT_CONFIG_PATH AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_PUBLISH_DIR \
+    AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR AUDIT_CONTAINER_PUBLISH_DIR; do
     write_env "$setting"
 done
 [[ -z $PROFILE_DIR ]] || write_env AUDIT_AWS_DIR

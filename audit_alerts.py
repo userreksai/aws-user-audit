@@ -1,4 +1,4 @@
-"""Send bounded operational failures to Lark; normal reports are email only."""
+"""Send bounded operational failures independently of normal report links."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -18,7 +18,7 @@ def notify_issues(config, report_day, issues, *, now=None):
 
     now = now or datetime.now(timezone.utc)
     stages = {"collection": "采集或解析不完整", "pdf": "PDF 生成失败", "publish": "网页发布失败",
-              "mail": "邮件投递失败或未确认", "job": "任务执行失败"}
+              "mail": "邮件投递失败或未确认", "lark": "日报链接投递失败或未确认", "job": "任务执行失败"}
     # Provider errors, request parameters and credentials never enter this payload.
     safe = []
     for item in issues:

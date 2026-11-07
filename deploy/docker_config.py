@@ -25,8 +25,9 @@ _SYSTEM_TREES = (
 )
 _SHARED_ROOTS = {"/", "/usr", "/usr/local", "/var", "/var/lib", "/opt",
                  "/home", "/root", "/tmp", "/mnt", "/media", "/srv"}
-_ENV_KEYS = ("AUDIT_REPORTS_DIR", "AUDIT_STATE_DIR", "AUDIT_CONTAINER_REPORTS_DIR",
-             "AUDIT_CONTAINER_STATE_DIR", "AUDIT_REQUIRES_PROFILE")
+_ENV_KEYS = ("AUDIT_REPORTS_DIR", "AUDIT_STATE_DIR", "AUDIT_PUBLISH_DIR",
+             "AUDIT_CONTAINER_REPORTS_DIR", "AUDIT_CONTAINER_STATE_DIR",
+             "AUDIT_CONTAINER_PUBLISH_DIR", "AUDIT_REQUIRES_PROFILE")
 
 
 class DockerConfigError(ValueError):
@@ -80,17 +81,22 @@ def build_plan(raw, validated, *, host_config_path, container_config_path):
     container_config = _absolute(container_config_path, "--config")
     reports, container_reports = _mapped_paths(raw, "OUTPUT_DIRECTORY", "reports", host_config, container_config)
     state, container_state = _mapped_paths(raw, "STATE_DIRECTORY", ".state", host_config, container_config)
+    publish, container_publish = _mapped_paths(raw, "PUBLISH_DIRECTORY", "index", host_config, container_config)
     if _overlap(reports, state) or _overlap(container_reports, container_state):
         raise DockerConfigError("OUTPUT_DIRECTORY 与 STATE_DIRECTORY 必须分开且不能互相嵌套。")
+    if (any(_overlap(publish, private) for private in (reports, state))
+            or any(_overlap(container_publish, private) for private in (container_reports, container_state))):
+        raise DockerConfigError("PUBLISH_DIRECTORY 必须与私有报告和状态目录分开且不能互相嵌套。")
     plan = {"AUDIT_REPORTS_DIR": reports, "AUDIT_STATE_DIR": state,
+            "AUDIT_PUBLISH_DIR": publish, "AUDIT_CONTAINER_PUBLISH_DIR": container_publish,
             "AUDIT_CONTAINER_REPORTS_DIR": container_reports, "AUDIT_CONTAINER_STATE_DIR": container_state,
             "AUDIT_REQUIRES_PROFILE": "1" if any(account.get("ENABLED", True) and account.get("AWS_PROFILE")
                                                   for account in validated["ACCOUNTS"]) else "0"}
     if raw.get("PDF_FONT_PATH", "").strip():
         source, target = _mapped_paths(raw, "PDF_FONT_PATH", "", host_config, container_config)
-        if (any(_overlap(source, directory) for directory in (reports, state))
-                or any(_overlap(target, directory) for directory in (container_reports, container_state))):
-            raise DockerConfigError("PDF_FONT_PATH 不能与 OUTPUT_DIRECTORY 或 STATE_DIRECTORY 重叠。")
+        if (any(_overlap(source, directory) for directory in (reports, state, publish))
+                or any(_overlap(target, directory) for directory in (container_reports, container_state, container_publish))):
+            raise DockerConfigError("PDF_FONT_PATH 不能与 OUTPUT_DIRECTORY、STATE_DIRECTORY 或 PUBLISH_DIRECTORY 重叠。")
         plan.update(AUDIT_FONT_SOURCE=source, AUDIT_CONTAINER_FONT_PATH=target)
     return plan
 

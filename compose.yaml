@@ -36,6 +36,11 @@ services:
         target: ${AUDIT_CONTAINER_STATE_DIR:-/usr/local/aws-user-audit/.state}
         bind:
           create_host_path: false
+      - type: bind
+        source: ${AUDIT_PUBLISH_DIR:-/usr/local/aws-user-audit/index}
+        target: ${AUDIT_CONTAINER_PUBLISH_DIR:-/usr/local/aws-user-audit/index}
+        bind:
+          create_host_path: false
     logging:
       driver: json-file
       options:

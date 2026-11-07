@@ -69,7 +69,7 @@ while (($#)); do
     case $1 in
         --install-dir) need_value "$@"; INSTALL_DIR=$2; shift 2 ;;
         --publish-dir|--nginx-config)
-            need_value "$@"; say "兼容参数 $1 已忽略；本版本仅生成 PDF/JSON 和邮件，不操作网页或 Nginx。"; shift 2 ;;
+            need_value "$@"; say "兼容参数 $1 已忽略；HTML 目录从私有 JSON 的 PUBLISH_DIRECTORY 读取，不操作 Nginx。"; shift 2 ;;
         --config) need_value "$@"; CONFIG_PATH=$2; shift 2 ;;
         --python) need_value "$@"; PYTHON=$2; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -204,7 +204,7 @@ if ((DRY_RUN)); then
     say "代码目录：$INSTALL_DIR"
     say "Python 环境：$INSTALL_DIR/.venv"
     say "统一私有配置：$CONFIG_PATH"
-    say '报告：仅归档 PDF/JSON 并通过邮件发送；不创建网页目录，不读取或修改 Nginx。'
+    say '报告：PDF/JSON 和邮件保留；每日任务按 JSON 更新最新 HTML，安装阶段不生成网页，不读取或修改 Nginx。'
     say "定时：每天北京时间 $DAILY_MAIL_TIME，启用停机补跑；安装当次不执行日报。"
     say "报告窗口：北京时间前一天 $REPORT_START_TIME 至报表日 $REPORT_END_TIME。"
     say '生成的 service：'
@@ -247,7 +247,7 @@ if ((UPDATE)); then
 fi
 
 RUNTIME_FILES=(aws_daily_audit.py aws_audit_multi.py audit_actions.py audit_event_catalog.py aws-event-translations.json audit_identity_summary.py audit_resource_summary.py audit_mail_summary.py audit_config.py audit_schedule.py audit_mail.py audit_mail_delivery.py
-    audit_pdf.py audit_alerts.py lark_notify.py requirements.txt install.sh README.md
+    audit_pdf.py audit_alerts.py audit_publication.py lark_notify.py requirements.txt install.sh README.md
     iam-policy.json iam-policy-single-region.json aws-audit-config.example.json
     deploy/install_support.py deploy/run_scheduled.py)
 for relative in "${RUNTIME_FILES[@]}"; do
@@ -367,7 +367,7 @@ say '安装完成；本次没有立即执行日报或发送邮件/Lark。'
 say "代码：$INSTALL_DIR"
 say "Python：$VENV_PYTHON"
 say "统一私有配置：$CONFIG_PATH"
-say '报告：仅 PDF/JSON 归档和邮件；原 Nginx 配置与旧网页未作任何修改。'
+say '报告：保留 PDF/JSON 和邮件；运行日报时按 JSON 覆盖更新 index/index.html，可独立开启 Lark 日报链接。Nginx 由管理员配置。'
 say "单元备份：$BACKUP_DIR"
 say "报告窗口：北京时间前一天 $REPORT_START_TIME 至报表日 $REPORT_END_TIME。"
 say "下一次执行（北京时间每天 $DAILY_MAIL_TIME 开始采集，完成后发送邮件）："

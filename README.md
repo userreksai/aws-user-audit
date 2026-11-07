@@ -1,10 +1,10 @@
-# AWS 多账号操作审计：PDF 邮件日报
+# AWS 多账号操作审计：PDF 邮件与最新 HTML 日报
 
-按 AWS 账号读取 CloudTrail 管理事件，每个启用账号生成一份按 IAM 用户 / 角色逐行统计的中文 PDF，所有账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。正常日报只通过邮件发送；开启 Lark 异常告警后，仅在采集、生成或邮件投递失败时通知群。
+按 AWS 账号读取 CloudTrail 管理事件，每个启用账号生成一份按 IAM 用户 / 角色逐行统计的中文 PDF，所有账号的 PDF **合并到同一封邮件**，支持多个收件人和抄送。每次生成还会更新一份合并全部账号的最新 HTML 日报；可独立开启 Lark 日报链接通知和异常告警。
 
 PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行，列出身份类型、新增、修改、删除、Secrets Manager 查看、登录、其他、失败及合计，最后显示 AWS 账号合计。另有 **用户操作与事件汇总**，按“用户 / 角色 + 服务 API”合并调用，显示中文事件、调用次数和失败次数。PDF 不展示逐次执行记录、参数、资源、来源 IP 或每次执行时间。表格较长时自动分页并重复表头，不截掉用户或事件。
 
-多账号日报只生成 **PDF 和私有 `report.json`**。JSON 保留操作时间、身份、API、资源、提交参数和请求结果，供本地复核；PDF 只含统计。普通查看忽略，Secrets Manager 查看保留。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
+多账号日报保留 **PDF 和私有 `report.json`**，并默认生成供 Nginx 读取的最新 HTML。JSON 保留操作时间、身份、API、资源、提交参数和请求结果，供本地复核；PDF 只含统计；HTML 沿用原详细审计页面，按账号展示操作与汇总。普通查看忽略，Secrets Manager 查看保留。这里审计 AWS 管理操作，不采用 RDS 的 SQL/IP 汇总口径。
 
 ## 已确认的部署配置
 
@@ -14,16 +14,17 @@ PDF 保留 **IAM 用户 / 角色维度**：例如 `beiou`、`hhjgx` 各占一行
 | Python 虚拟环境 | `/usr/local/aws-user-audit/.venv` |
 | 统一私有 JSONC | `/usr/local/aws-user-audit/aws-audit-config.json` |
 | 归档 | `/usr/local/aws-user-audit/reports/<账号ID>/<报表结束日期>/` |
+| 最新网页 | `/usr/local/aws-user-audit/index/index.html`，每次生成覆盖更新 |
 | 邮件状态 | `/usr/local/aws-user-audit/.state/`，仅任务用户可访问 |
 | 每日执行 | **北京时间 10:05**（`DAILY_MAIL_TIME`），不依赖服务器系统时区 |
 | 查询窗口 | **昨日 10:00 ≤ 事件时间 < 今日 10:00**，24 小时，相邻日报不重叠 |
 | 停机恢复 | 只补最近一份已结束的日报；配置的统计结束时刻之前恢复，选择前一结束日 |
 
-**安装/更新只部署代码、模板、服务与定时器，不立即查询 AWS 或发送通知。** 每日任务不生成 HTML、CSS、JS 或 `index/`，邮件不含网页链接。Nginx 已从安装流程移除，现有 Nginx 文件原样保留；旧服务器的 `/audit`、`/audit/` 由使用者手动清理，保留原前端和 RDS 路由。
+**安装/更新只部署代码、模板、服务与定时器，不立即查询 AWS 或发送通知。** 日报运行时默认在 `index/` 更新 `index.html` 及所需 CSS/JS。Nginx 的目录映射、访问控制和域名由使用者自行配置，安装器不修改或管理 Nginx；PDF 邮件与现有定时任务继续保留。
 
 ## 安装和更新
 
-需要 Docker 部署时，使用独立的 [Docker 部署说明](DOCKER.md) 和 `install-docker.sh`。Docker 支持不会修改、停用或替换现有 systemd、cron、Nginx；配置只读挂载，报告与状态持久化，容器内部按北京时间定时。已有配置不覆盖，首次缺配置仅初始化完整模板并提示填写。
+部署时可选择源码 + systemd 或 Docker，现有源码方案继续有效。需要 Docker 时，使用独立的 [Docker 部署说明](DOCKER.md) 和 `install-docker.sh`。Docker 支持不会修改、停用或替换现有 systemd、cron、Nginx；配置只读挂载，报告、最新网页与状态持久化，容器内部按北京时间定时。已有配置不覆盖，首次缺配置仅初始化完整模板并提示填写。
 
 ```bash
 cd /opt/aws-user-audit-src
@@ -71,7 +72,7 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 
 `systemctl cat` 中 Python、工作目录和配置文件都应指向新目录。旧 `/usr/local/shenji` 的历史文件保留，不自动删除或搬迁；系统定时器改为新路径。自行维护的旧 cron 若仍存在，安装器会停止并提示，避免重复运行。
 
-安装流程仅管理审计服务与定时器，不需要 Nginx、网站路径或域名。旧 `--nginx-config`、`--publish-dir` 等网页选项仅接受并提示忽略，便于沿用安装命令。安装失败恢复原代码、服务单元和定时器状态；pip 依赖安装不具备完整回滚。新路径不应与 RDS 项目共用。
+安装流程仅管理审计服务与定时器，Nginx 由使用者配置。旧 `--nginx-config`、`--publish-dir` 安装参数仍兼容接收并忽略；实际网页目录与访问地址由统一 JSON 中的 `PUBLISH_DIRECTORY`、`REPORT_URL` 控制。安装失败恢复原代码、服务单元和定时器状态；pip 依赖安装不具备完整回滚。新路径不应与 RDS 项目共用。
 
 ## 私有配置填写
 
@@ -81,6 +82,9 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 {
   "OUTPUT_DIRECTORY": "reports",
   "STATE_DIRECTORY": ".state",
+  "HTML_REPORT_ENABLED": true,
+  "PUBLISH_DIRECTORY": "index",
+  "REPORT_URL": "https://zybocedata-pass.v668live.com/audit/",
   "TIMEZONE": "Asia/Shanghai",
   "DAILY_MAIL_TIME": "10:05",
   "REPORT_START_TIME": "10:00",
@@ -95,6 +99,7 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
   "MAIL_RECIPIENTS": ["audit@example.com"],
   "MAIL_CC": ["ops@example.com"],
   "MAIL_SUBJECT": "AWS账号操作审计日报",
+  "LARK_REPORT_ENABLED": false,
   "LARK_ALERTS_ENABLED": false,
   "LARK_WEBHOOK_URL": "",
   "LARK_SIGNING_SECRET": "",
@@ -119,8 +124,8 @@ journalctl -u aws-user-audit.service -n 100 --no-pager
 - `ACCOUNTS[*].TAG` 是可选账号标签，例如 `prod-支付`、`uat-预生产`、`dev-测试`，支持中文、最多 120 字符。旧配置没有 TAG 时正常运行并只显示账号 ID；手动加入后，下次运行生效。`NAME` 的目录短名规则和 `ACCOUNT_ID` 的 12 位校验保持不变，TAG 不用于路径或凭据选择。
 - 使用原 root profile `audit` 时保留 `AWS_PROFILE: "audit"`，Key 留空。使用单独 Key 时 `AWS_PROFILE` 留空，成对填写 ID/Secret；临时凭据还需 Token。均留空时使用默认凭据链/实例角色。每个启用账号先通过 STS 核对归属，错配账号不继续读取 CloudTrail。
 - `REGIONS: "all"` 扫描本账号已启用区域，标准 AWS 分区另纳入 `us-east-1` 以覆盖全局事件；也可填写区域数组。单个账号失败不阻止其他账号，失败账号 PDF 明确标记不完整，邮件标题也带不完整标记，不把失败当成零操作。
-- 开启异常群时填真实 `LARK_WEBHOOK_URL` 并设置 `LARK_ALERTS_ENABLED: true`，签名校验开启时同时填写 `LARK_SIGNING_SECRET`。原 `lark-config.json` 可供你复制地址和签名；新定时任务只读取统一 JSON，不发送正常 Lark 日报。单次发现失败即告警，同一轮报告的同类异常一小时内抑制重复；只在任务实际执行时检查，不另加分钟级重试定时器。
-- 相对目录均以配置文件所在目录计算。新模板取消 `PUBLISH_DIRECTORY`、`REPORT_URL`；已有配置中保留这些旧字段也可运行，程序忽略它们。
+- Lark 日报链接由 `LARK_REPORT_ENABLED` 控制，异常告警由 `LARK_ALERTS_ENABLED` 控制；二者独立，均使用 `LARK_WEBHOOK_URL` 和可选 `LARK_SIGNING_SECRET`。旧 `lark-config.json` 可供复制地址和签名，定时任务只读取统一 JSON。异常单次发现即告警，同一轮报告的同类异常一小时内抑制重复；只在任务实际执行时检查，不另加分钟级重试定时器。
+- 相对目录均以配置文件所在目录计算。`HTML_REPORT_ENABLED` 默认 `true`；`PUBLISH_DIRECTORY` 默认 `index`，现在重新生效；`REPORT_URL` 默认沿用原 `/audit/` 地址，需按自己的 Nginx 域名与路由填写。网页目录必须与 PDF/JSON 归档、状态和私有配置分开，不能互相嵌套或使用符号链接；只向该目录写入网页及 CSS/JS。
 - `PDF_FONT_PATH` 可选中文 TTF/TTC；Linux 可安装 `fonts-wqy-zenhei` 提高跨设备显示一致性。留空时自动寻找字体，否则使用中文 CID 字体。
 - `DAILY_MAIL_TIME` 控制每天启动采集和生成报告的北京时间，默认 `10:05`；邮件在采集和 PDF 完成后发送，不保证 10:05 整到达邮箱。
 - `REPORT_START_TIME` 是统计开始时刻（报表结束日的前一天），`REPORT_END_TIME` 是统计结束时刻（报表结束日），默认均为 `10:00`，即 24 小时。开始和结束都包含日期，采用左闭右开，报表日期是结束日。`DAILY_MAIL_TIME` 不能早于 `REPORT_END_TIME`。
@@ -135,6 +140,23 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
 ```
 
 安装的预检另检查本地 profile 是否存在，不请求 AWS 凭据，也不能证明远端权限或 SMTP 授权有效。
+
+## 最新 HTML 与 Lark 日报链接
+
+默认每次报告生成后，把全部启用账号合并为 `/usr/local/aws-user-audit/index/index.html`，同时更新 `audit-report.css`、`audit-report.js`。使用同一固定入口原子覆盖最新内容，不按日期在网页目录累积 HTML；账号停用后下次生成的最新页面不再包含该账号。PDF 与私有 JSON 仍按原账号/日期路径归档，邮件正文、附件和自动邮件额度保持原逻辑。
+
+在现有私有 JSON 中加入或修改以下字段即可开启正常 Lark 日报通知，不要用此片段替换整个配置：
+
+```json
+"HTML_REPORT_ENABLED": true,
+"PUBLISH_DIRECTORY": "index",
+"REPORT_URL": "https://zybocedata-pass.v668live.com/audit/",
+"LARK_REPORT_ENABLED": true
+```
+
+把 `REPORT_URL` 改为 Nginx 实际提供的固定 HTTP/HTTPS 访问地址，并在原有 `LARK_WEBHOOK_URL`、`LARK_SIGNING_SECRET` 中保留或填写机器人配置。正常日报 Lark 默认关闭，只有显式开启后才通知；无需开启异常告警。网页发布成功后才发送一条合并账号摘要及最新报告链接；相同报告摘要成功通知后不重复发，失败保留给后续运行重试。网页发布失败时保留原页面，不发送指向本次报告的正常通知，PDF 和邮件流程仍继续处理。
+
+将 `HTML_REPORT_ENABLED` 设为 `false` 可关闭网页生成；此时不能同时开启 `LARK_REPORT_ENABLED`。命令行 `--no-publish` 仅关闭本次网页更新及正常日报 Lark，保留 PDF/JSON、邮件和按配置启用的异常告警。安装器不改写已有私有 JSON，也不会替你配置 Nginx。
 
 邮件正文示例（3 个启用账号，对应 3 份独立 PDF）：
 
@@ -161,7 +183,7 @@ dev-测试-796973492026
 | beiou | 2 | 3 | 5 | 4 | 3 | 5 | 9 |
 | jit | 4 | 2 | 1 | 4 | 3 | 6 | 12 |
 
-邮件使用真正的 HTML 表格，并保留纯文本表格备选；不会生成或发布网页。账号分组来自本次启用账号的报告，数量不固定为 7。每组仅显示上述七列中至少一列大于 0 的 IAM 用户、角色或其他调用身份；七列全为 0 的行不显示。保留行中未涉及的资源列仍显示 0。整组无匹配操作时保留账号标题和查询状态，显示“本账号在上述七类资源中无操作。”。不另查账号中没有任何本期事件的 IAM 用户，角色会话仍按原有角色身份合并。
+邮件使用真正的 HTML 表格，并保留纯文本表格备选；最新网页由独立的发布流程生成，邮件表格口径保持不变。账号分组来自本次启用账号的报告，数量不固定为 7。每组仅显示上述七列中至少一列大于 0 的 IAM 用户、角色或其他调用身份；七列全为 0 的行不显示。保留行中未涉及的资源列仍显示 0。整组无匹配操作时保留账号标题和查询状态，显示“本账号在上述七类资源中无操作。”。不另查账号中没有任何本期事件的 IAM 用户，角色会话仍按原有角色身份合并。
 
 IAM 用户执行七类资源操作时会计入正文对应用户行；创建 IAM 用户、修改 IAM 策略等 IAM 服务操作仍保留在 PDF 的全量用户/事件汇总及私有 JSON 中，不增加正文七列次数。建议使用 `REGIONS: "all"`，该模式会补查全局 IAM 管理事件所在的 `us-east-1`。
 
@@ -207,7 +229,7 @@ sudo journalctl -u aws-user-audit.service -n 100 --no-pager
 ls -lh /usr/local/aws-user-audit/reports/
 ```
 
-手动指定报表结束日；不加 `--send-mail` 仅采集并生成 PDF 和私有 JSON：
+手动指定报表结束日；不加 `--send-mail` 不发送邮件，仍生成 PDF/JSON、默认更新最新网页，并按 `LARK_REPORT_ENABLED` 决定是否通知 Lark：
 
 ```bash
 sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_audit_multi.py   --config /usr/local/aws-user-audit/aws-audit-config.json --date 2026-11-04
@@ -232,9 +254,14 @@ sudo /usr/local/aws-user-audit/.venv/bin/python /usr/local/aws-user-audit/aws_au
     report.json
   .state/
     mail-delivery.json
+    lark-report.json
+  index/
+    index.html
+    audit-report.css
+    audit-report.js
 ```
 
-多账号入口返回码：0 完成或按规则跳过邮件，1 启动/配置错误，2 查询不完整，3 通知失败或投递不确定，5 报告/PDF 生成失败。旧 `--no-publish` 选项接受但无实际作用。
+多账号入口返回码：0 完成或按规则跳过邮件，1 启动/配置错误，2 查询不完整，3 通知失败或投递不确定，4 网页发布失败，5 报告/PDF 生成失败。`--no-publish` 可显式跳过本次网页和正常日报 Lark，保留其余流程。
 
 
 ## PDF 的账号维度
@@ -273,7 +300,7 @@ KMS 加密、解密或签名是使用密钥的操作，不能认定为修改密�
 
 ## 报告能说明什么
 
-例如，日志中存在 `hhjgx` 调用 `ModifyInstanceAttribute` 的事件时，PDF 汇总其“修改 EC2 实例属性”的调用及失败次数；具体操作时间、实例 ID、提交的属性参数、API 名称和请求结果保存在私有 JSON 中。范围与警告同样保留在 JSON 和终端输出中。本版本的多账号入口不生成 HTML 或 CSV。
+例如，日志中存在 `hhjgx` 调用 `ModifyInstanceAttribute` 的事件时，PDF 汇总其“修改 EC2 实例属性”的调用及失败次数；具体操作时间、实例 ID、提交的属性参数、API 名称和请求结果保存在私有 JSON 中。范围与警告同样保留在 JSON 和终端输出中。最新 HTML 沿用详细审计页面并按账号展示，不生成 CSV；PDF 和邮件的汇总口径保持不变。
 
 登录信息仅归入能识别的登录事件，例如 `ConsoleLogin`、`CheckMfa`、`GetSigninToken`；`ConsoleLogin` 明确显示中文登录操作及成功或失败结果。不能识别为增删改的非登录写操作保留在“其他操作”；STS 身份会话请求按前文说明另行识别。登录信息和其他操作分类仅在实际存在对应事件时显示。
 
@@ -400,7 +427,7 @@ aws --profile audit ec2 describe-regions --region eu-north-1 --query "Regions[].
 
 CloudTrail LookupEvents 仅覆盖最近 90 天的管理事件，不包含数据事件。任一区域查询或事件解析失败时，JSON、PDF、邮件主题和正文均标记不完整；相关问题按配置触发 Lark 异常告警。查询成功也可能遇到 CloudTrail 日志延迟，应结合任务日志复核。每次调用按 EventID 去重计数，不等于人工操作或资源数量。
 
-旧的单账号网页/机器人辅助代码保留以兼容历史用途；当前部署服务固定使用 `aws_audit_multi.py` 的 PDF 邮件流程。旧网页文件不被新任务更新，服务器现有 Nginx 配置由使用者自行清理。
+旧的单账号入口保留兼容。当前部署服务固定使用 `aws_audit_multi.py`，在原 PDF 邮件流程基础上恢复合并账号的最新网页与可选 Lark 链接通知；默认更新 `/usr/local/aws-user-audit/index/index.html`，Nginx 映射由使用者管理。
 
 本地离线回归不连接真实 AWS、SMTP 或 Lark：
 

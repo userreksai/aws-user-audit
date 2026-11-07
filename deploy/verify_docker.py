@@ -40,16 +40,19 @@ def main():
     run("docker", "run", "--rm", "--network", "none", "--entrypoint", "/app/.venv/bin/python", IMAGE,
         "-c", "from pathlib import Path; p=Path('/app'); assert not any((p/n).exists() for n in "
         "['.git','.aws','.venv-host','aws-audit-config.json','lark-config.json','aws-rds-audit','test_audit_pdf.py']); "
+        "assert (p/'audit_publication.py').is_file(); from audit_publication import publish_latest_reports; "
         "from audit_pdf import _font; assert _font().startswith('AuditCjk-'); print('Image allowlist and embedded Chinese font verified')")
     with tempfile.TemporaryDirectory(prefix="audit docker-ci-") as directory:
         root = Path(directory)
-        config, reports, state = root / "config.json", root / "reports", root / "state"
+        config, reports, state, publish = root / "config.json", root / "reports", root / "state", root / "index"
         reports.mkdir(mode=0o700)
         state.mkdir(mode=0o700)
+        publish.mkdir(mode=0o755)
         fixture(config)
         mounts = ["--mount", f"type=bind,src={config},dst={CONTAINER_CONFIG},readonly",
                   "--mount", f"type=bind,src={reports},dst=/usr/local/aws-user-audit/reports",
-                  "--mount", f"type=bind,src={state},dst=/usr/local/aws-user-audit/.state"]
+                  "--mount", f"type=bind,src={state},dst=/usr/local/aws-user-audit/.state",
+                  "--mount", f"type=bind,src={publish},dst=/usr/local/aws-user-audit/index"]
         base = ["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges:true", "--user", f"{os.getuid()}:{os.getgid()}", *mounts]
         original = config.read_bytes()
@@ -127,11 +130,11 @@ def main():
         for account in ("000000000001", "000000000002"):
             pdf = reports / account / "2026-11-05" / f"{account}-2026-11-05-aws操作审计.pdf"
             text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
-            assert "AI 对话：发送消息" in text and "beiou" in text
+            assert "AI 对话：发送消息" in text and "newest-smoke-actor" in text
             assert "角色身份不直接认定为自然人" not in text
         assert (state / "mail-delivery.json").stat().st_mode & 0o777 == 0o600
         env = {**os.environ, "AUDIT_CONFIG_PATH": str(config), "AUDIT_REPORTS_DIR": str(reports),
-               "AUDIT_STATE_DIR": str(state), "AUDIT_IMAGE": IMAGE}
+               "AUDIT_STATE_DIR": str(state), "AUDIT_PUBLISH_DIR": str(publish), "AUDIT_IMAGE": IMAGE}
         run("docker", "compose", "-f", "compose.yaml", "config", "--quiet", env=env)
         env.update(AUDIT_AWS_DIR=str(root / "aws"), AUDIT_FONT_SOURCE="/usr/share/fonts/fake.ttf",
                    AUDIT_CONTAINER_FONT_PATH="/usr/share/fonts/fake.ttf")

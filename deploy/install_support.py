@@ -56,7 +56,7 @@ def unit_arg(value):
 
 def render_units(install_dir=DEFAULT_INSTALL_DIR, publish_dir=None, config_path=None, *, catch_up=True,
                  daily_mail_time=DEFAULT_DAILY_MAIL_TIME):
-    """Render PDF/mail units; ``publish_dir`` is ignored for old callers."""
+    """Render report/mail units; publication settings are read from private JSON."""
     parse_clock(daily_mail_time, "DAILY_MAIL_TIME")
     install_dir = linux_path(install_dir)
     config_path = linux_path(config_path or str(PurePosixPath(install_dir) / "aws-audit-config.json"))
@@ -100,7 +100,7 @@ WantedBy=timers.target
 
 
 def local_preflight(install_dir, config_path, publish_dir=None, *, expected_schedule=None):
-    """Validate locally; legacy ``publish_dir`` no longer controls a webroot."""
+    """Validate locally; publication paths come from the private JSON settings."""
     linux_path(install_dir)
     target = Path(config_path)
     if not target.is_file() or target.is_symlink():
@@ -156,7 +156,7 @@ def main(argv=None):
     for command in (render, check):
         command.add_argument("--install-dir", required=True)
         command.add_argument("--config", required=True)
-        command.add_argument("--publish-dir", help="兼容旧命令；已忽略，不创建网页或操作 Nginx")
+        command.add_argument("--publish-dir", help="兼容旧命令；已忽略，HTML 目录从私有 JSON 读取，不操作 Nginx")
     render.add_argument("--catch-up", choices=("yes", "no"), default="yes")
     render.add_argument("--output-dir", required=True)
     check.add_argument("--daily-mail-time", help="安装器已生成计划中的发送时刻，用于检查并发修改")
@@ -173,6 +173,9 @@ def main(argv=None):
             print("多账号与邮件私有配置检查通过；未查询 AWS、未发送邮件或 Lark。")
             return 0
         schedule = configured_schedule(args.config)
+        from audit_config import load_config
+        publication = load_config(args.config) if Path(args.config).exists() else {}
+        html_enabled = publication.get("HTML_REPORT_ENABLED", True)
         units = render_units(args.install_dir, args.publish_dir, args.config, catch_up=args.catch_up == "yes",
                              daily_mail_time=schedule["daily_mail_time"])
         directory = Path(args.output_dir)
@@ -183,7 +186,10 @@ def main(argv=None):
                 "config": args.config, "timezone": "Asia/Shanghai", "time": schedule["daily_mail_time"] + ":00",
                 **schedule,
                 "catch_up": args.catch_up == "yes", "installation_runs_report": False,
-                "report_formats": ["pdf", "json"], "html_publication": False}
+                "report_formats": ["pdf", "json"] + (["html"] if html_enabled else []),
+                "html_publication": html_enabled,
+                "publish_dir": publication.get("PUBLISH_DIRECTORY", str(PurePosixPath(args.config).parent / "index")),
+                "installation_publishes_html": False}
         (directory / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         # A validated, single-line settings subset for the Bash installer; never secrets.
         (directory / "schedule.env").write_text(

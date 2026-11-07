@@ -212,7 +212,9 @@ def report_fingerprint(config):
     accounts = [{key: account[key] for key in ("NAME", "ACCOUNT_ID", "TAG", "REGIONS")}
                 for account in config["ACCOUNTS"] if account["ENABLED"]]
     public = {"start": config["REPORT_START_TIME"], "end": config["REPORT_END_TIME"],
-              "accounts": sorted(accounts, key=lambda account: account["ACCOUNT_ID"])}
+              "accounts": sorted(accounts, key=lambda account: account["ACCOUNT_ID"]),
+              "publication": {key: config.get(key) for key in
+                              ("HTML_REPORT_ENABLED", "PUBLISH_DIRECTORY", "LARK_REPORT_ENABLED", "REPORT_URL")}}
     return hashlib.sha256(json.dumps(public, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
