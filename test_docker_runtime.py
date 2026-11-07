@@ -238,6 +238,24 @@ class DockerRuntimeTests(unittest.TestCase):
                       [add_account, beijing("2026-11-05T10:05:00")], popen=popen)
         self.assertEqual(seen_accounts, [1, 2])
 
+    def test_html_settings_apply_at_next_due_without_touching_the_mail_receipt(self):
+        self.write_config(HTML_REPORT_ENABLED=False)
+        self.seed(beijing("2026-11-03T10:06:00"))
+        receipt = self.state_directory / "mail-delivery.json"
+        receipt.write_bytes(b"EXISTING_PRIVATE_MAIL_ALLOWANCE")
+        seen_publication = []
+        def spawn(*args, **kwargs):
+            current = runtime.load_config(self.config_path)
+            seen_publication.append(current["HTML_REPORT_ENABLED"])
+            return FakeProcess()
+        def enable_html(clock, control):
+            self.write_config(HTML_REPORT_ENABLED=True, PUBLISH_DIRECTORY="latest-web")
+            clock.jump(beijing("2026-11-05T10:03:00"))
+        self.schedule(beijing("2026-11-05T10:02:00"),
+                      [enable_html, beijing("2026-11-05T10:05:00")], popen=Mock(side_effect=spawn))
+        self.assertEqual(seen_publication, [False, True])
+        self.assertEqual(receipt.read_bytes(), b"EXISTING_PRIVATE_MAIL_ALLOWANCE")
+
     def test_long_job_consumes_due_times_it_crossed_and_waits_for_next_future_due(self):
         self.seed(beijing("2026-11-04T10:06:00"))
         def finish_two_days_later(clock, control):

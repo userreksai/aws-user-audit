@@ -234,7 +234,12 @@ class MultiAccountTests(unittest.TestCase):
             for content in (json.dumps(structured), text):
                 for secret in (SECRET, EVENT_SECRET, PROVIDER_SECRET, "TEST_SMTP_SECRET", row["AWS_ACCESS_KEY_ID"]):
                     self.assertNotIn(secret, content)
-        self.assertFalse((self.root / "index").exists())
+        page = (self.root / "index" / "index.html").read_text(encoding="utf-8")
+        for row in accounts:
+            self.assertIn(row["ACCOUNT_ID"], page)
+            self.assertIn(row["TAG"], page)
+        for secret in (SECRET, EVENT_SECRET, PROVIDER_SECRET, "TEST_SMTP_SECRET"):
+            self.assertNotIn(secret, page)
         self.assertNotIn(config["REPORT_URL"], smtp.call_args.args[2])
         for session in sessions.values():
             for client in session.cloudtrails.values():
@@ -677,6 +682,74 @@ class MultiAccountTests(unittest.TestCase):
         self.assertFalse(list(archive.rglob("*.html")))
         self.assertFalse(list(archive.rglob("*.css")))
         self.assertFalse(list(archive.rglob("*.js")))
+
+    def test_html_publication_failure_keeps_pdf_mail_and_never_notifies_a_stale_page(self):
+        config, _ = self.config()
+        factory, _ = self.factory(config["ACCOUNTS"])
+        webroot = Path(config["PUBLISH_DIRECTORY"])
+        webroot.mkdir()
+        latest = webroot / "index.html"
+        latest.write_text("OLD_REPORT", encoding="utf-8")
+        with patch("audit_publication.publish_latest_reports", side_effect=OSError(PROVIDER_SECRET)), \
+             patch("audit_publication.notify_report") as report_lark, \
+             patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            result = self.execute_report(config, factory, send_mail=True)
+        self.assertEqual(result, 4)
+        smtp.assert_called_once()
+        report_lark.assert_not_called()
+        self.assertEqual(latest.read_text(encoding="utf-8"), "OLD_REPORT")
+        self.assertEqual(len(list(Path(config["OUTPUT_DIRECTORY"]).rglob("*.pdf"))), 1)
+        self.assertEqual(len(list(Path(config["OUTPUT_DIRECTORY"]).rglob("report.json"))), 1)
+        self.assertNotIn(PROVIDER_SECRET, self.stderr.getvalue())
+
+    def test_lark_report_failure_does_not_block_existing_mail_or_html(self):
+        config, _ = self.config()
+        factory, _ = self.factory(config["ACCOUNTS"])
+        with patch("audit_publication.notify_report", side_effect=RuntimeError(PROVIDER_SECRET)), \
+             patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 3)
+        smtp.assert_called_once()
+        self.assertTrue((Path(config["PUBLISH_DIRECTORY"]) / "index.html").is_file())
+        self.assertNotIn(PROVIDER_SECRET, self.stderr.getvalue())
+
+    def test_normal_lark_links_are_independent_and_identical_reruns_are_suppressed(self):
+        config, _ = self.config(LARK_REPORT_ENABLED=True, LARK_ALERTS_ENABLED=False,
+                                LARK_WEBHOOK_URL="https://open.larksuite.com/open-apis/bot/v2/hook/fictional")
+        factory, _ = self.factory(config["ACCOUNTS"])
+        with patch("lark_notify._send_payload", return_value={"code": 0}) as lark, \
+             patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 0)
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 0)
+        lark.assert_called_once()
+        smtp.assert_called_once()
+        self.assertIn(config["REPORT_URL"], json.dumps(lark.call_args.args[0]))
+        latest = Path(config["PUBLISH_DIRECTORY"]) / "index.html"
+        self.assertIn(config["ACCOUNTS"][0]["ACCOUNT_ID"], latest.read_text(encoding="utf-8"))
+        self.assertFalse(list(Path(config["OUTPUT_DIRECTORY"]).rglob("*.html")))
+
+    def test_no_publish_skips_html_and_report_lark_but_keeps_mail(self):
+        config, _ = self.config(LARK_REPORT_ENABLED=True,
+                                LARK_WEBHOOK_URL="https://open.larksuite.com/open-apis/bot/v2/hook/fictional")
+        factory, _ = self.factory(config["ACCOUNTS"])
+        with patch("audit_publication.publish_latest_reports") as publish, \
+             patch("audit_publication.notify_report") as lark, \
+             patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True, no_publish=True), 0)
+        publish.assert_not_called()
+        lark.assert_not_called()
+        smtp.assert_called_once()
+
+    def test_html_disabled_keeps_existing_pdf_and_mail_only_mode(self):
+        config, _ = self.config(HTML_REPORT_ENABLED=False)
+        factory, _ = self.factory(config["ACCOUNTS"])
+        with patch("audit_publication.publish_latest_reports") as publish, \
+             patch("audit_publication.notify_report") as lark, \
+             patch("audit_mail.send_reports", return_value={"smtp_accepted": True}) as smtp:
+            self.assertEqual(self.execute_report(config, factory, send_mail=True), 0)
+        publish.assert_not_called()
+        lark.assert_not_called()
+        smtp.assert_called_once()
+        self.assertFalse(Path(config["PUBLISH_DIRECTORY"]).exists())
 
     def test_failed_pdf_prevents_partial_account_mail_but_other_pdf_is_retained(self):
         import audit_pdf

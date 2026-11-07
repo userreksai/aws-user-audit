@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from audit_config import load_config
+from lark_notify import DEFAULT_REPORT_URL
 
 
 class ConfigTests(unittest.TestCase):
@@ -23,8 +24,10 @@ class ConfigTests(unittest.TestCase):
     def test_paths_defaults_and_profile(self):
         config = self.load()
         self.assertEqual(config["OUTPUT_DIRECTORY"], str(self.root / "reports"))
-        self.assertNotIn("PUBLISH_DIRECTORY", config)
-        self.assertNotIn("REPORT_URL", config)
+        self.assertEqual(config["PUBLISH_DIRECTORY"], str(self.root / "index"))
+        self.assertEqual(config["REPORT_URL"], DEFAULT_REPORT_URL)
+        self.assertTrue(config["HTML_REPORT_ENABLED"])
+        self.assertFalse(config["LARK_REPORT_ENABLED"])
         self.assertEqual(config["STATE_DIRECTORY"], str(self.root / ".state"))
         self.assertEqual(config["ACCOUNTS"][0]["AWS_PROFILE"], "audit")
         self.assertEqual(config["ACCOUNTS"][0]["TAG"], "")
@@ -56,8 +59,10 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config["LARK_WEBHOOK_URL"])
         self.assertTrue(all(not a["AWS_SECRET_ACCESS_KEY"] for a in config["ACCOUNTS"]))
         self.assertTrue(all(a["TAG"] for a in config["ACCOUNTS"]))
-        self.assertNotIn("PUBLISH_DIRECTORY", config)
-        self.assertNotIn("REPORT_URL", config)
+        self.assertEqual(Path(config["PUBLISH_DIRECTORY"]), Path(__file__).parent / "index")
+        self.assertEqual(config["REPORT_URL"], DEFAULT_REPORT_URL)
+        self.assertTrue(config["HTML_REPORT_ENABLED"])
+        self.assertFalse(config["LARK_REPORT_ENABLED"])
 
     def test_account_tag_supports_chinese_and_missing_tag_does_not_modify_file(self):
         config = self.load({"ACCOUNTS": [{**self.account, "TAG": "  prod-支付  "}]})
@@ -129,15 +134,82 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.load({**self.raw, "TIMEZONE": "UTC"})
 
-    def test_old_web_fields_are_inert_and_do_not_require_web_directory_checks(self):
-        for patch in ({"PUBLISH_DIRECTORY": ".", "REPORT_URL": "http://example.com/audit/"},
-                      {"PUBLISH_DIRECTORY": ["old", "unused"], "REPORT_URL": None},
-                      {"OUTPUT_DIRECTORY": "index/reports", "STATE_DIRECTORY": "index/.state"}):
-            with self.subTest(patch=patch):
-                config = self.load({**self.raw, **patch})
-                for key in ("PUBLISH_DIRECTORY", "REPORT_URL"):
-                    if key in patch:
-                        self.assertEqual(config[key], patch[key])
+    def test_publication_fields_resolve_existing_config_without_rewriting_it(self):
+        config = self.load({**self.raw, "PUBLISH_DIRECTORY": "public/latest", "REPORT_URL": "https://audit.example.com/audit/"})
+        before = self.path.read_bytes()
+        self.assertEqual(config["PUBLISH_DIRECTORY"], str(self.root / "public" / "latest"))
+        self.assertEqual(config["REPORT_URL"], "https://audit.example.com/audit/")
+        self.assertEqual(load_config(self.path), config)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.root / "public").exists())
+        self.load()
+        before = self.path.read_bytes()
+        load_config(self.path)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertNotIn("PUBLISH_DIRECTORY", json.loads(before))
+
+    def test_publication_directory_cannot_expose_config_reports_or_state(self):
+        for patch in ({"PUBLISH_DIRECTORY": "."}, {"PUBLISH_DIRECTORY": self.path.name},
+                      {"PUBLISH_DIRECTORY": self.path.name + "/public"},
+                      {"PUBLISH_DIRECTORY": "reports"}, {"PUBLISH_DIRECTORY": ".state"},
+                      {"PUBLISH_DIRECTORY": "reports/public"}, {"PUBLISH_DIRECTORY": ".state/public"},
+                      {"OUTPUT_DIRECTORY": "index/reports"}, {"STATE_DIRECTORY": "index/.state"}):
+            with self.subTest(patch=patch), self.assertRaisesRegex(ValueError, "PUBLISH_DIRECTORY"):
+                self.load({**self.raw, **patch})
+        for destination in ("/", "/usr/local", "/etc/audit", "/root/.aws/public", "/safe/../etc/public"):
+            with self.subTest(destination=destination), self.assertRaisesRegex(ValueError, "PUBLISH_DIRECTORY"):
+                self.load({**self.raw, "PUBLISH_DIRECTORY": destination})
+
+    def test_publication_directory_rejects_symlinks_and_regular_files(self):
+        target = self.root / "public-target"
+        target.mkdir()
+        link = self.root / "public-link"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("platform cannot create test directory symlinks")
+        for destination in (str(link), str(link / "child")):
+            with self.subTest(destination=destination), self.assertRaisesRegex(ValueError, "PUBLISH_DIRECTORY"):
+                self.load({**self.raw, "PUBLISH_DIRECTORY": destination})
+
+    def test_publication_directory_rejects_regular_files_and_invalid_values(self):
+        file = self.root / "ordinary-file"
+        file.write_text("existing", encoding="utf-8")
+        for value in (str(file), [], None, "", "public\nFAKE_SECRET"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "PUBLISH_DIRECTORY") as caught:
+                self.load({**self.raw, "PUBLISH_DIRECTORY": value})
+            self.assertNotIn("FAKE_SECRET", str(caught.exception))
+
+    def test_report_urls_are_plain_http_links_and_never_echo_private_values(self):
+        self.assertEqual(self.load({**self.raw, "REPORT_URL": ""})["REPORT_URL"], "")
+        self.assertEqual(self.load({**self.raw, "REPORT_URL": "http://audit.example.com:8080/audit/"})["REPORT_URL"],
+                         "http://audit.example.com:8080/audit/")
+        for value in (None, [], "file:///FAKE_SECRET", "https://user:FAKE_SECRET@example.com/audit/",
+                      "https://example.com/audit/?token=FAKE_SECRET", "https://example.com/audit/#FAKE_SECRET",
+                      "https://example.com/{FAKE_SECRET}", "https://example.com/FAKE_SECRET\n",
+                      "https://example.com/FAKE_SECRET\u200b", "https://example.com:bad/FAKE_SECRET"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "REPORT_URL") as caught:
+                self.load({**self.raw, "REPORT_URL": value})
+            self.assertNotIn("FAKE_SECRET", str(caught.exception))
+
+    def test_daily_lark_is_independent_and_requires_a_published_report(self):
+        robot = "https://open.larksuite.com/open-apis/bot/v2/hook/FICTIONAL_TEST_ROBOT"
+        config = self.load({**self.raw, "LARK_REPORT_ENABLED": True, "LARK_WEBHOOK_URL": robot})
+        self.assertTrue(config["LARK_REPORT_ENABLED"])
+        self.assertFalse(config["LARK_ALERTS_ENABLED"])
+        config = self.load({**self.raw, "LARK_ALERTS_ENABLED": True, "LARK_WEBHOOK_URL": robot})
+        self.assertTrue(config["LARK_ALERTS_ENABLED"])
+        self.assertFalse(config["LARK_REPORT_ENABLED"])
+        for patch in ({"LARK_REPORT_ENABLED": True},
+                      {"LARK_REPORT_ENABLED": True, "LARK_WEBHOOK_URL": robot, "HTML_REPORT_ENABLED": False},
+                      {"LARK_REPORT_ENABLED": True, "LARK_WEBHOOK_URL": robot, "REPORT_URL": ""}):
+            with self.subTest(patch=patch), self.assertRaises(ValueError):
+                self.load({**self.raw, **patch})
+        for key in ("HTML_REPORT_ENABLED", "LARK_REPORT_ENABLED"):
+            for value in (1, "true", None):
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                    self.load({**self.raw, key: value})
+        self.assertFalse(self.load({**self.raw, "HTML_REPORT_ENABLED": False})["HTML_REPORT_ENABLED"])
 
     def test_enabled_lark_requires_valid_robot_but_disabled_may_be_blank(self):
         with self.assertRaisesRegex(ValueError, "LARK_WEBHOOK_URL"):

@@ -4,6 +4,11 @@
   // 相对路径以本配置所在目录为起点。安装默认目录为 /usr/local/aws-user-audit。
   "OUTPUT_DIRECTORY": "reports",
   "STATE_DIRECTORY": ".state",
+  // 最新多账号 HTML 每次原子覆盖 index.html；目录只放网页和 CSS/JS，不放私有 JSON。
+  "HTML_REPORT_ENABLED": true,
+  "PUBLISH_DIRECTORY": "index",
+  // Nginx 提供的固定访问地址；按实际域名/路由修改，程序不修改 Nginx。
+  "REPORT_URL": "https://zybocedata-pass.v668live.com/audit/",
   "TIMEZONE": "Asia/Shanghai",
   // 每日启动采集、生成和发信的北京时间；邮件在采集/PDF完成后提交。修改后重跑install.sh更新定时器。
   "DAILY_MAIL_TIME": "10:05",
@@ -27,7 +32,9 @@
   "MAIL_SENDER_NAME": "",
   // 可选中文 TTF/TTC；留空自动寻找文泉驿或宋体，否则使用中文 CID 字体。
   "PDF_FONT_PATH": "",
-  // Lark 仅发采集、PDF生成或邮件投递异常。填写机器人地址后改为 true。
+  // 正常日报链接通知与异常通知独立开关；沿用下面同一机器人及签名。
+  "LARK_REPORT_ENABLED": false,
+  // 采集、PDF/网页生成或邮件投递异常告警。
   "LARK_ALERTS_ENABLED": false,
   "LARK_WEBHOOK_URL": "",
   "LARK_SIGNING_SECRET": "",

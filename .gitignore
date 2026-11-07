@@ -1,5 +1,6 @@
 # Generated reports and local Python environment.
 reports/
+index/
 preview-site/
 __pycache__/
 *.pyc

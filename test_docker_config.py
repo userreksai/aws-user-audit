@@ -51,8 +51,10 @@ class DockerConfigTests(unittest.TestCase):
         result = self.plan()
         self.assertEqual(result, {"AUDIT_REPORTS_DIR": "/srv/audit data/reports",
                                   "AUDIT_STATE_DIR": "/srv/audit data/.state",
+                                  "AUDIT_PUBLISH_DIR": "/srv/audit data/index",
                                   "AUDIT_CONTAINER_REPORTS_DIR": "/usr/local/aws-user-audit/reports",
                                   "AUDIT_CONTAINER_STATE_DIR": "/usr/local/aws-user-audit/.state",
+                                  "AUDIT_CONTAINER_PUBLISH_DIR": "/usr/local/aws-user-audit/index",
                                   "AUDIT_REQUIRES_PROFILE": "0"})
         self.assertEqual(self.source.read_bytes(), before)
         self.assertEqual(set(self.root.iterdir()), entries_before)
@@ -84,7 +86,7 @@ class DockerConfigTests(unittest.TestCase):
 
     def test_whitespace_only_font_keeps_existing_empty_font_semantics(self):
         self.write_config(config(PDF_FONT_PATH="   "))
-        self.assertEqual(len(self.plan()), 5)
+        self.assertEqual(len(self.plan()), 7)
 
     def test_relative_parent_components_are_normalized_before_safety_checks(self):
         result = self.pure_plan(config(OUTPUT_DIRECTORY="../reports", STATE_DIRECTORY="../state"))
@@ -123,7 +125,7 @@ class DockerConfigTests(unittest.TestCase):
         paths = ("/", "/etc", "/etc/private", "/app", "/app/reports", "/root/.aws",
                  "/root/.aws/backups", "/root", "/proc/data", "/sys/data", "/dev/data",
                  "/usr/bin/audit", "/usr/share/audit", "/var/run/audit", "/opt", "/tmp")
-        for key in ("OUTPUT_DIRECTORY", "STATE_DIRECTORY"):
+        for key in ("OUTPUT_DIRECTORY", "STATE_DIRECTORY", "PUBLISH_DIRECTORY"):
             for path in paths:
                 with self.subTest(key=key, path=path):
                     with self.assertRaises(docker_config.DockerConfigError):
@@ -144,6 +146,31 @@ class DockerConfigTests(unittest.TestCase):
             with self.subTest(output=output):
                 with self.assertRaises(docker_config.DockerConfigError):
                     self.pure_plan(config(OUTPUT_DIRECTORY=output))
+
+    def test_publish_directory_is_an_independent_host_readable_mount(self):
+        self.write_config(config(PUBLISH_DIRECTORY="web/latest"))
+        before = self.source.read_bytes()
+        plan = self.plan()
+        self.assertEqual(plan["AUDIT_PUBLISH_DIR"], "/srv/audit data/web/latest")
+        self.assertEqual(plan["AUDIT_CONTAINER_PUBLISH_DIR"], "/usr/local/aws-user-audit/web/latest")
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertNotIn("TEST_SECRET", json.dumps(plan))
+
+    def test_publish_directory_never_exposes_private_reports_state_or_config(self):
+        for publish in ("reports", "reports/web", ".state", ".state/web", ".", "aws-audit-config.json",
+                        "/srv/audit data/reports", "/usr/local/aws-user-audit/.state"):
+            with self.subTest(publish=publish), self.assertRaises(docker_config.DockerConfigError):
+                self.pure_plan(config(PUBLISH_DIRECTORY=publish))
+        with self.assertRaises(docker_config.DockerConfigError):
+            self.pure_plan(config(PUBLISH_DIRECTORY="public", OUTPUT_DIRECTORY="public/private"))
+        with self.assertRaises(docker_config.DockerConfigError):
+            self.pure_plan(config(PUBLISH_DIRECTORY="public", STATE_DIRECTORY="public/private"))
+
+    def test_html_disabled_preserves_a_separate_mount_plan(self):
+        self.write_config(config(HTML_REPORT_ENABLED=False))
+        plan = self.plan()
+        self.assertEqual(plan["AUDIT_PUBLISH_DIR"], "/srv/audit data/index")
+        self.assertEqual(plan["AUDIT_CONTAINER_PUBLISH_DIR"], "/usr/local/aws-user-audit/index")
 
     def test_linux_paths_reject_controls_separators_windows_and_tilde(self):
         invalid = ("reports\nsecret", "reports\tsecret", "rep\x00orts", "reports,ro", "C:/reports",
@@ -168,12 +195,12 @@ class DockerConfigTests(unittest.TestCase):
                 result = self.plan()
                 self.assertEqual(result["AUDIT_FONT_SOURCE"], expected_source)
                 self.assertEqual(result["AUDIT_CONTAINER_FONT_PATH"], expected_target)
-                self.assertEqual(len(result), 7)
+                self.assertEqual(len(result), 9)
 
     def test_font_cannot_cover_private_config_code_system_or_writable_mounts(self):
         for font in ("/app/aws_audit_multi.py", "/etc/passwd", "/proc/a", "/sys/a", "/dev/a", "/root/.aws/config",
                      "aws-audit-config.json", "reports/font.ttf", ".state/font.ttf", "/srv/audit data/reports/font.ttf",
-                     "/usr/local/aws-user-audit/.state/font.ttf"):
+                     "/usr/local/aws-user-audit/.state/font.ttf", "index/font.ttf"):
             with self.subTest(font=font):
                 with self.assertRaises(docker_config.DockerConfigError):
                     self.pure_plan(config(PDF_FONT_PATH=font))
@@ -213,7 +240,7 @@ class DockerConfigTests(unittest.TestCase):
             self.plan()
         self.assertNotIn("TEST_SECRET", str(captured.exception))
 
-    def test_cli_outputs_only_the_five_tab_separated_plan_fields(self):
+    def test_cli_outputs_only_the_seven_tab_separated_plan_fields(self):
         plan = self.plan()
         out, err = io.StringIO(), io.StringIO()
         with patch.object(docker_config, "create_plan", return_value=plan) as create, redirect_stdout(out), redirect_stderr(err):
@@ -234,7 +261,7 @@ class DockerConfigTests(unittest.TestCase):
             self.assertEqual(err.getvalue(), "")
             self.assertNotIn("TEST_SECRET", out.getvalue())
             if format_name == "env":
-                self.assertEqual(len(out.getvalue().splitlines()), 7)
+                self.assertEqual(len(out.getvalue().splitlines()), 9)
             else:
                 self.assertEqual(json.loads(out.getvalue()), plan)
 

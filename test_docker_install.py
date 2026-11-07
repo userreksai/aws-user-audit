@@ -15,8 +15,8 @@ from test_install_script import bash_path, shell_path
 
 ROOT = Path(__file__).resolve().parent
 FIXED_CONFIG = "/usr/local/aws-user-audit/aws-audit-config.json"
-ENV_NAMES = ("AUDIT_CONFIG_PATH", "AUDIT_REPORTS_DIR", "AUDIT_STATE_DIR", "AUDIT_CONTAINER_REPORTS_DIR",
-             "AUDIT_CONTAINER_STATE_DIR", "AUDIT_AWS_DIR", "AUDIT_FONT_SOURCE", "AUDIT_CONTAINER_FONT_PATH",
+ENV_NAMES = ("AUDIT_CONFIG_PATH", "AUDIT_REPORTS_DIR", "AUDIT_STATE_DIR", "AUDIT_PUBLISH_DIR", "AUDIT_CONTAINER_REPORTS_DIR",
+             "AUDIT_CONTAINER_STATE_DIR", "AUDIT_CONTAINER_PUBLISH_DIR", "AUDIT_AWS_DIR", "AUDIT_FONT_SOURCE", "AUDIT_CONTAINER_FONT_PATH",
              "AUDIT_UID", "AUDIT_GID")
 
 
@@ -41,6 +41,7 @@ class DockerInstallerTests(unittest.TestCase):
         self.config = self.data / "aws-audit-config.json"
         self.reports = self.data / "reports"
         self.state = self.data / ".state"
+        self.publish = self.data / "index"
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         self.log = self.root / "docker-calls"
@@ -85,7 +86,7 @@ set -euo pipefail
 printf 'CALL' >> "$FAKE_LOG"
 printf '\t%s' "$@" >> "$FAKE_LOG"
 printf '\n' >> "$FAKE_LOG"
-for name in AUDIT_CONFIG_PATH AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR AUDIT_AWS_DIR AUDIT_FONT_SOURCE AUDIT_CONTAINER_FONT_PATH AUDIT_UID AUDIT_GID; do
+for name in AUDIT_CONFIG_PATH AUDIT_REPORTS_DIR AUDIT_STATE_DIR AUDIT_PUBLISH_DIR AUDIT_CONTAINER_REPORTS_DIR AUDIT_CONTAINER_STATE_DIR AUDIT_CONTAINER_PUBLISH_DIR AUDIT_AWS_DIR AUDIT_FONT_SOURCE AUDIT_CONTAINER_FONT_PATH AUDIT_UID AUDIT_GID; do
     printf 'ENV\t%s\t%s\n' "$name" "${!name:-}" >> "$FAKE_LOG"
 done
 if [[ ${1:-} == compose && ${2:-} == version ]]; then
@@ -128,11 +129,13 @@ fi
         self.config.chmod(0o600)
         return self.config.read_bytes()
 
-    def write_plan(self, *, profile=0, reports=None, state=None, container_reports=None, container_state=None, font=None):
+    def write_plan(self, *, profile=0, reports=None, state=None, publish=None, container_reports=None, container_state=None, container_publish=None, font=None):
         values = [("AUDIT_REPORTS_DIR", shell_path(reports or self.reports)),
                   ("AUDIT_STATE_DIR", shell_path(state or self.state)),
+                  ("AUDIT_PUBLISH_DIR", shell_path(publish or self.publish)),
                   ("AUDIT_CONTAINER_REPORTS_DIR", container_reports or "/usr/local/aws-user-audit/reports"),
                   ("AUDIT_CONTAINER_STATE_DIR", container_state or "/usr/local/aws-user-audit/.state"),
+                  ("AUDIT_CONTAINER_PUBLISH_DIR", container_publish or "/usr/local/aws-user-audit/index"),
                   ("AUDIT_REQUIRES_PROFILE", str(profile))]
         if font is not None:
             values += [("AUDIT_FONT_SOURCE", shell_path(font)), ("AUDIT_CONTAINER_FONT_PATH", "/custom/fonts/chinese.ttf")]
@@ -163,6 +166,7 @@ fi
         self.assertEqual(self.config.read_bytes(), (ROOT / "aws-audit-config.example.json").read_bytes())
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(self.data.stat().st_mode), 0o755)
         self.assertFalse(self.log.exists())
         self.assertFalse((self.data / "docker.env").exists())
         self.assertIn("重新运行", result.stdout)
@@ -212,10 +216,57 @@ fi
         self.assertIn("AUDIT_GID='" + gid + "'", env)
         self.assertIn("AUDIT_CONFIG_PATH='" + shell_path(self.config) + "'", env)
         self.assertIn("AUDIT_CONTAINER_REPORTS_DIR='/usr/local/aws-user-audit/reports'", env)
+        self.assertIn("AUDIT_PUBLISH_DIR='" + shell_path(self.publish) + "'", env)
+        self.assertIn("AUDIT_CONTAINER_PUBLISH_DIR='/usr/local/aws-user-audit/index'", env)
+        self.assertTrue(self.publish.is_dir())
         self.assertNotIn("SECRET", env)
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE((self.data / "docker.env").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(self.reports.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(self.publish.stat().st_mode), 0o755)
+
+    def test_html_directory_and_existing_page_are_preserved_separately_from_private_data(self):
+        original = self.write_config()
+        self.publish.mkdir()
+        latest = self.publish / "index.html"
+        latest.write_bytes(b"EXISTING LATEST REPORT")
+        result = self.run_installer("--no-start")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(latest.read_bytes(), b"EXISTING LATEST REPORT")
+        self.assertEqual(self.config.read_bytes(), original)
+        self.assertNotIn("SECRET", (self.data / "docker.env").read_text(encoding="utf-8"))
+
+    def test_html_mount_cannot_expose_private_mounts(self):
+        self.write_config()
+        for publish, container_publish in ((self.reports, None), (self.state, None),
+                                           (self.data, None), (None, "/usr/local/aws-user-audit/.state"),
+                                           (None, "/usr/local/aws-user-audit/reports/public")):
+            with self.subTest(publish=publish, container_publish=container_publish):
+                self.write_plan(publish=publish, container_publish=container_publish)
+                self.log.unlink(missing_ok=True)
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any("up" in call or "check-config" in call for call in self.calls()))
+
+    def test_new_public_parent_chain_is_traversable_without_changing_existing_ancestor(self):
+        original = self.write_config()
+        self.root.chmod(0o750)
+        base = self.root / "new-web-parent"
+        nested = base / "nested"
+        publish = nested / "index"
+        self.write_plan(publish=publish, container_publish="/srv/new-web-parent/nested/index")
+        result = self.run_installer("--no-start")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(publish.is_dir())
+        self.assertEqual(self.config.read_bytes(), original)
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o750)
+            for directory in (base, nested, publish):
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(self.reports.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
 
     def test_no_start_builds_and_checks_but_does_not_replace_service(self):

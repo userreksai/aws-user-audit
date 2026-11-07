@@ -186,7 +186,7 @@ class LocalPreflightTests(unittest.TestCase):
         self.path.write_text(json.dumps({"AUTO_MAIL_MAX_PER_DAY": 0, "ACCOUNTS": [{"NAME": "test",
             "ACCOUNT_ID": "123456789012", "AWS_ACCESS_KEY_ID": "TEST_KEY", "AWS_SECRET_ACCESS_KEY": "TEST_SECRET"}]}), encoding="utf-8")
         config = install_support.local_preflight(INSTALL, self.path)
-        self.assertNotIn("PUBLISH_DIRECTORY", config)
+        self.assertEqual(config["PUBLISH_DIRECTORY"], str(self.root / "index"))
         self.assertEqual(config["ACCOUNTS"][0]["AWS_PROFILE"], "")
 
 
@@ -302,9 +302,10 @@ class ConfiguredScheduleTests(unittest.TestCase):
         plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
         self.assertEqual(plan["time"], "09:10:00")
         self.assertEqual(plan["report_end_time"], "09:00")
-        self.assertEqual(plan["report_formats"], ["pdf", "json"])
-        self.assertFalse(plan["html_publication"])
-        self.assertNotIn("publish_dir", plan)
+        self.assertEqual(plan["report_formats"], ["pdf", "json", "html"])
+        self.assertTrue(plan["html_publication"])
+        self.assertTrue(plan["publish_dir"].endswith("/index"))
+        self.assertFalse(plan["installation_publishes_html"])
         self.assertEqual((output / "schedule.env").read_text(encoding="utf-8"),
                          "DAILY_MAIL_TIME=09:10\nREPORT_START_TIME=08:00\nREPORT_END_TIME=09:00\n")
         self.assertIn("OnCalendar=*-*-* 09:10:00 Asia/Shanghai", (output / "aws-user-audit.timer").read_text(encoding="utf-8"))
